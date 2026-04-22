@@ -45,16 +45,16 @@ class MainWindow(QWidget):
         project_explorer_panel = self._build_project_explorer()
         module_nav_panel = self._build_module_navigation_bar()
         main_workspace_panel = self._build_main_workspace()
-        message_panel_panel = self._build_message_panel()
+        message_panel = self._build_message_panel()
 
         mid_layout.addWidget(project_explorer_panel, 1)
         mid_right_layout.addWidget(module_nav_panel, 1)
         mid_right_layout.addWidget(main_workspace_panel, 9)
         mid_layout.addLayout(mid_right_layout, 5)
 
-        main_layout.addLayout(menu_bar_panel, 1)
+        main_layout.addWidget(menu_bar_panel, 1)
         main_layout.addLayout(mid_layout, 10)
-        main_layout.addWidget(message_panel_panel, 2)
+        main_layout.addWidget(message_panel, 2)
 
         self.setLayout(main_layout)
 
@@ -65,6 +65,10 @@ class MainWindow(QWidget):
         print(f"已切换到模块：{module_name}")
 
     def _build_menu_bar(self):
+        widget = QWidget()        
+        widget.setObjectName("menu_bar")
+        layout = QHBoxLayout(widget)
+        
         self.btn_file = QPushButton("文件")
         self.btn_help = QPushButton("帮助")
         self.btn_setting = QPushButton("设置")
@@ -73,12 +77,17 @@ class MainWindow(QWidget):
         self.btn_help.clicked.connect(lambda: self.on_test_click("帮助"))
         self.btn_setting.clicked.connect(lambda: self.on_test_click("设置"))
 
-        menu_bar_layout = QHBoxLayout()
-        menu_bar_layout.addWidget(self.btn_file)
-        menu_bar_layout.addWidget(self.btn_help)
-        menu_bar_layout.addWidget(self.btn_setting) 
+        layout.addWidget(self.btn_file)
+        layout.addWidget(self.btn_help)
+        layout.addWidget(self.btn_setting) 
 
-        return menu_bar_layout
+        widget.setStyleSheet("""
+        #menu_bar {
+            border: 2px solid black;
+        }
+        """)
+
+        return widget
     
     def _build_module_navigation_bar(self):
         widget = QWidget()        
@@ -133,8 +142,6 @@ class MainWindow(QWidget):
         widget.setStyleSheet("""
         #main_workspace {
             border: 2px solid black;
-            border-radius: 12px;
-            background-color: #ffffff;
         }
         """)
 
