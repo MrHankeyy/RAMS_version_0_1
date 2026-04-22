@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
 from models import ResponseItem, FactorItem, ProjectData
 
 
-class BusinessModelPage(QWidget):
+class ModelingPage(QWidget):
     def __init__(self, project_data: ProjectData):
         super().__init__()
         self.project_data = project_data

@@ -1,14 +1,16 @@
 from PyQt6.QtWidgets import (
-    QWidget, QPushButton, QVBoxLayout, QHBoxLayout, QStackedWidget, QLabel
+    QWidget, QPushButton, QVBoxLayout, QHBoxLayout, 
+    QStackedWidget, QLabel, QMainWindow, QMenu
 )
+from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtCore import Qt
 
-from pages.business_model_page import BusinessModelPage
+from pages.modeling_page import ModelingPage
 from pages.simple_page import SimplePage
 from models import ProjectData
 
 
-class MainWindow(QWidget):
+class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
@@ -16,6 +18,7 @@ class MainWindow(QWidget):
 
         self.setWindowTitle("鲁棒优化管理系统")
         self.resize(1000, 650)
+        self.setWindowIcon(QIcon("icon.png"))
 
         self._build_ui()
 
@@ -37,57 +40,55 @@ class MainWindow(QWidget):
         5. 分析报告 Report, REP
         '''
 
+        self._build_menu_bar()
+
         main_layout = QVBoxLayout()
         mid_layout = QHBoxLayout()
         mid_right_layout = QVBoxLayout()
         
-        menu_bar_panel = self._build_menu_bar()
         project_explorer_panel = self._build_project_explorer()
         module_nav_panel = self._build_module_navigation_bar()
         main_workspace_panel = self._build_main_workspace()
         message_panel = self._build_message_panel()
 
         mid_layout.addWidget(project_explorer_panel, 1)
-        mid_right_layout.addWidget(module_nav_panel, 1)
+        mid_right_layout.addWidget(module_nav_panel)
         mid_right_layout.addWidget(main_workspace_panel, 9)
         mid_layout.addLayout(mid_right_layout, 5)
 
-        main_layout.addWidget(menu_bar_panel, 1)
         main_layout.addLayout(mid_layout, 10)
         main_layout.addWidget(message_panel, 2)
 
-        self.setLayout(main_layout)
-
-    def on_test_click(self, name):
-        print(f"已点击：{name}")
-
-    def on_switch_module(self, module_name):
-        print(f"已切换到模块：{module_name}")
-
-    def _build_menu_bar(self):
-        widget = QWidget()        
-        widget.setObjectName("menu_bar")
-        layout = QHBoxLayout(widget)
+        central_widget = QWidget()
+        central_widget.setLayout(main_layout)
+        self.setCentralWidget(central_widget)
         
-        self.btn_file = QPushButton("文件")
-        self.btn_help = QPushButton("帮助")
-        self.btn_setting = QPushButton("设置")
+        central_widget.setObjectName("central_widget")
+    
+    def _build_menu_bar(self):
+        menu_bar = self.menuBar()
 
-        self.btn_file.clicked.connect(lambda: self.on_test_click("文件"))
-        self.btn_help.clicked.connect(lambda: self.on_test_click("帮助"))
-        self.btn_setting.clicked.connect(lambda: self.on_test_click("设置"))
+        file_menu = menu_bar.addMenu("文件")
 
-        layout.addWidget(self.btn_file)
-        layout.addWidget(self.btn_help)
-        layout.addWidget(self.btn_setting) 
+        action_new = QAction("新建项目", self)
+        action_open = QAction("打开项目", self)
+        action_save = QAction("保存", self)
 
-        widget.setStyleSheet("""
-        #menu_bar {
-            border: 2px solid black;
-        }
-        """)
+        file_menu.addAction(action_new)
+        file_menu.addAction(action_open)
+        file_menu.addAction(action_save)
 
-        return widget
+        setting_menu = menu_bar.addMenu("设置")
+        action_setting = QAction("参数设置", self)
+        setting_menu.addAction(action_setting)
+
+        help_menu = menu_bar.addMenu("帮助")
+        action_about = QAction("关于", self)
+        help_menu.addAction(action_about)
+
+        action_new.triggered.connect(lambda: print("新建项目"))
+        action_open.triggered.connect(lambda: print("打开项目"))
+        action_save.triggered.connect(lambda: print("保存"))
     
     def _build_module_navigation_bar(self):
         widget = QWidget()        
@@ -101,19 +102,19 @@ class MainWindow(QWidget):
         self.btn_switch_REP = QPushButton("分析报告")
         
         self.btn_switch_MOD.clicked.connect(
-            lambda: self.on_switch_module("业务建模")
+            lambda: self.on_switch_module("业务建模", 0)
         )
         self.btn_switch_CFG.clicked.connect(
-            lambda: self.on_switch_module("方案配置")
+            lambda: self.on_switch_module("方案配置", 1)
         )
         self.btn_switch_DM.clicked.connect(
-            lambda: self.on_switch_module("数据管理")
+            lambda: self.on_switch_module("数据管理", 2)
         )
         self.btn_switch_OPT.clicked.connect(
-            lambda: self.on_switch_module("设计优化")
+            lambda: self.on_switch_module("设计优化", 3)
         )
         self.btn_switch_REP.clicked.connect(
-            lambda: self.on_switch_module("分析报告")
+            lambda: self.on_switch_module("分析报告", 4)
         )
 
         layout.addWidget(self.btn_switch_MOD)
@@ -124,10 +125,29 @@ class MainWindow(QWidget):
 
         widget.setStyleSheet("""
         #module_navigation_bar {
-            border: 2px solid black;
+            border: 1px solid #bbb;
+        }
+
+        /* 按钮默认 */
+        QPushButton {
+            border: none;
+            background-color: #f0f0f0;
+            padding: 8px;
+            font-size: 14px;
+        }
+
+        /* 鼠标悬停 */
+        QPushButton:hover {
+            background-color: #e0e0e0;
+        }
+
+        /* 按下 */
+        QPushButton:pressed {
+            background-color: #d0d0d0;
         }
         """)
-
+        widget.setFixedHeight(50)
+        
         return widget
     
     def _build_main_workspace(self):
@@ -135,13 +155,25 @@ class MainWindow(QWidget):
         widget.setObjectName("main_workspace")
         layout = QVBoxLayout(widget)
 
-        temp_label = QLabel('这是主工作区') #临时标签，后续接入主工作区后去除
-        temp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(temp_label)
+        self.stacked_widget = QStackedWidget()
+
+        self.page_MOD = ModelingPage(self.project_data)
+        self.page_CFG = SimplePage("这是方案配置界面")
+        self.page_DM = SimplePage("这是数据管理界面")
+        self.page_OPT = SimplePage("这是设计优化界面")
+        self.page_REP = SimplePage("这是分析报告界面")
+
+        self.stacked_widget.addWidget(self.page_MOD)
+        self.stacked_widget.addWidget(self.page_CFG)
+        self.stacked_widget.addWidget(self.page_DM)
+        self.stacked_widget.addWidget(self.page_OPT)
+        self.stacked_widget.addWidget(self.page_REP)
+
+        layout.addWidget(self.stacked_widget)
 
         widget.setStyleSheet("""
         #main_workspace {
-            border: 2px solid black;
+            border: 1px solid #bbb;
         }
         """)
 
@@ -158,7 +190,7 @@ class MainWindow(QWidget):
 
         widget.setStyleSheet("""
         #project_explorer {
-            border: 2px solid black;
+            border: 1px solid #bbb;
         }
         """)
 
@@ -175,55 +207,20 @@ class MainWindow(QWidget):
 
         widget.setStyleSheet("""
         #message_panel {
-            border: 2px solid black;
+            border: 1px solid #bbb;
         }
         """)
 
         return widget
         
-'''
-    def _build_ui(self):
-        self.btn_a = QPushButton("业务建模")
-        self.btn_b = QPushButton("方案配置")
-        self.btn_c = QPushButton("数据管理")
-        self.btn_d = QPushButton("设计优化")
-        self.btn_e = QPushButton("分析报告")
+    def on_test_click(self, name):
+        print(f"已点击：{name}")
 
-        top_layout = QHBoxLayout()
-        top_layout.addWidget(self.btn_a)
-        top_layout.addWidget(self.btn_b)
-        top_layout.addWidget(self.btn_c)
-        top_layout.addWidget(self.btn_d)
-        top_layout.addWidget(self.btn_e)
-
-        self.stacked_widget = QStackedWidget()
-
-        self.page1 = BusinessModelPage(self.project_data)
-        self.page2 = SimplePage("这是方案配置界面")
-        self.page3 = SimplePage("这是数据管理界面")
-        self.page4 = SimplePage("这是设计优化界面")
-        self.page5 = SimplePage("这是分析报告界面")
-
-        self.stacked_widget.addWidget(self.page1)
-        self.stacked_widget.addWidget(self.page2)
-        self.stacked_widget.addWidget(self.page3)
-        self.stacked_widget.addWidget(self.page4)
-        self.stacked_widget.addWidget(self.page5)
-
-        self.btn_a.clicked.connect(lambda: self.switch_page(0))
-        self.btn_b.clicked.connect(lambda: self.switch_page(1))
-        self.btn_c.clicked.connect(lambda: self.switch_page(2))
-        self.btn_d.clicked.connect(lambda: self.switch_page(3))
-        self.btn_e.clicked.connect(lambda: self.switch_page(4))
-
-        main_layout = QVBoxLayout()
-        main_layout.addLayout(top_layout)
-        main_layout.addWidget(self.stacked_widget)
-        self.setLayout(main_layout)
+    def on_switch_module(self, module_name, index):
+        print(f"已切换到模块：{module_name}")
+        self.switch_page(index)
 
     def switch_page(self, index: int):
         if index != 0:
-            self.page1.sync_to_project_data()
+            self.page_MOD.sync_to_project_data()
         self.stacked_widget.setCurrentIndex(index)
-
-'''
