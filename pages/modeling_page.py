@@ -15,10 +15,6 @@ class ModelingPage(QWidget):
         main_layout = QVBoxLayout()
         main_layout.setSpacing(15)
 
-        title = QLabel("业务建模模块")
-        title.setStyleSheet("color: red; font-weight: bold; font-size: 18px;")
-        main_layout.addWidget(title)
-
         # ========= 响应区 =========
         response_group = QGroupBox("响应")
         response_layout = QVBoxLayout()

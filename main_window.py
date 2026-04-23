@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QWidget, QPushButton, QVBoxLayout, QHBoxLayout, 
-    QStackedWidget, QLabel, QMainWindow, QMenu
+    QStackedWidget, QLabel, QMainWindow, QMenu, QSizePolicy
 )
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtCore import Qt
@@ -42,7 +42,7 @@ class MainWindow(QMainWindow):
 
         self._build_menu_bar()
 
-        main_layout = QVBoxLayout()
+        main_layout = QVBoxLayout()        
         mid_layout = QHBoxLayout()
         mid_right_layout = QVBoxLayout()
         
@@ -93,13 +93,32 @@ class MainWindow(QMainWindow):
     def _build_module_navigation_bar(self):
         widget = QWidget()        
         widget.setObjectName("module_navigation_bar")
+
         layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         self.btn_switch_MOD = QPushButton("业务建模")
         self.btn_switch_CFG = QPushButton("方案配置")
         self.btn_switch_DM = QPushButton("数据管理")
         self.btn_switch_OPT = QPushButton("设计优化")
         self.btn_switch_REP = QPushButton("分析报告")
+
+        self.btns_switch = [
+            self.btn_switch_MOD, 
+            self.btn_switch_CFG, 
+            self.btn_switch_DM, 
+            self.btn_switch_OPT, 
+            self.btn_switch_REP, 
+        ]
+        for btn in self.btns_switch:
+            btn.setSizePolicy(
+                QSizePolicy.Policy.Expanding, 
+                QSizePolicy.Policy.Expanding
+            )
+            btn.setProperty("active", False)             #每个按钮默认为非激活状态，表示页面是否选中
+
+        self.btn_switch_MOD.setProperty("active", True)                  #初始化默认激活业务建模页面
         
         self.btn_switch_MOD.clicked.connect(
             lambda: self.on_switch_module("业务建模", 0)
@@ -125,15 +144,16 @@ class MainWindow(QMainWindow):
 
         widget.setStyleSheet("""
         #module_navigation_bar {
-            border: 1px solid #bbb;
+            border: None;
         }
 
         /* 按钮默认 */
         QPushButton {
-            border: none;
+            border: 1px solid #bbb;
             background-color: #f0f0f0;
+            font-weight: bold;
             padding: 8px;
-            font-size: 14px;
+            font-size: 20px;
         }
 
         /* 鼠标悬停 */
@@ -144,6 +164,12 @@ class MainWindow(QMainWindow):
         /* 按下 */
         QPushButton:pressed {
             background-color: #d0d0d0;
+        }
+
+        /* 选中 */         
+        QPushButton[active="true"] {
+            background-color: #c8dfff;
+            font-weight: bold;
         }
         """)
         widget.setFixedHeight(50)
@@ -217,8 +243,13 @@ class MainWindow(QMainWindow):
         print(f"已点击：{name}")
 
     def on_switch_module(self, module_name, index):
-        print(f"已切换到模块：{module_name}")
         self.switch_page(index)
+        
+        for i, btn in enumerate(self.btns_switch):
+            btn.setProperty("active", i == index)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+            btn.update()
 
     def switch_page(self, index: int):
         if index != 0:
