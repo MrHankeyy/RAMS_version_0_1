@@ -6,7 +6,10 @@ from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtCore import Qt
 
 from pages.modeling_page import ModelingPage
-from pages.simple_page import SimplePage
+from pages.configuration_page import ConfigurationPage
+from pages.data_management_page import DataManagementPage
+from pages.optimization_page import OptimizationPage
+from pages.analysis_page import AnalysisPage
 from models import ProjectData
 
 
@@ -184,10 +187,13 @@ class MainWindow(QMainWindow):
         self.stacked_widget = QStackedWidget()
 
         self.page_MOD = ModelingPage(self.project_data)
-        self.page_CFG = SimplePage("这是方案配置界面")
-        self.page_DM = SimplePage("这是数据管理界面")
-        self.page_OPT = SimplePage("这是设计优化界面")
-        self.page_REP = SimplePage("这是分析报告界面")
+        self.page_CFG = ConfigurationPage(self.project_data)
+        self.page_DM = DataManagementPage(self.project_data)
+        self.page_OPT = OptimizationPage(self.project_data)
+        self.page_REP = AnalysisPage(self.project_data)
+        
+        # 绑定优化计算完成信号：自动跳转到“分析报告”页
+        self.page_OPT.optimization_finished.connect(lambda: self.on_switch_module("分析报告", 4))
 
         self.stacked_widget.addWidget(self.page_MOD)
         self.stacked_widget.addWidget(self.page_CFG)
