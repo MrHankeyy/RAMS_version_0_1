@@ -98,8 +98,11 @@ class OptimizationPage(QWidget):
         # 针对每个因子，随机生成一个设计推荐值与其浮动范围
         for f in self.project_data.factors:
             try:
-                min_v = float(f.param1)
-                max_v = float(f.param2)
+                if f.is_fixed and f.fixed_value:
+                    min_v = max_v = float(f.fixed_value)
+                else:
+                    min_v = float(f.param1)
+                    max_v = float(f.param2)
                 if min_v > max_v:  # 防御用户填反了
                     min_v, max_v = max_v, min_v
             except ValueError:
@@ -121,6 +124,11 @@ class OptimizationPage(QWidget):
                 try:
                     limit_val = float(r.robust_limit)
                     resp_str += f" | 满足边界 {limit_val}"
+                except ValueError:
+                    pass
+            elif "鲁棒约束" in paradigm and r.feature == "望目" and r.lower and r.upper:
+                try:
+                    resp_str += f" | 满足边界 [{float(r.lower)}, {float(r.upper)}]"
                 except ValueError:
                     pass
             resp_results.append(resp_str)
@@ -147,9 +155,12 @@ class OptimizationPage(QWidget):
         has_bounds = False
         reasons = []
         for r in self.project_data.responses:
-            if r.robust_limit:  # 现在读取专属的鲁棒约束边界极值
+            if r.robust_limit:  # 稳定性阈值: 望大=最小值 / 望小=最大值
                 has_bounds = True
                 reasons.append(f"指标[{r.name}]包含红线: (边界≤{r.robust_limit})")
+            elif r.feature == "望目" and r.lower and r.upper:
+                has_bounds = True
+                reasons.append(f"指标[{r.name}]包含红线: ({r.lower}≤边界≤{r.upper})")
                 
         bounds_txt = "\n\n💡检测到底层数据边界情况：" + " | ".join(reasons) if has_bounds else "\n\n💡底层指标无明确防越界红线极值定义。无法启用惩罚约束！请返回【业务建模】填写！"
 

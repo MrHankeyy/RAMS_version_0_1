@@ -4,29 +4,29 @@ from dataclasses import dataclass, field
 @dataclass
 class ResponseItem:
     name: str = ""
-    kind: str = "目标"
-    feature: str = "望小"
-    lower: str = ""       # 目标下限
-    upper: str = ""       # 目标上限
-    robust_limit: str = "" # 鲁棒约束边界极值 (针对带约束优化的范式3)
+    kind: str = "目标"          # 目标 / 约束 / 目标+约束
+    feature: str = "望小"       # 望大 / 望小 / 望目
+    lower: str = ""             # 望目时: 稳定性阈值下界
+    upper: str = ""             # 望目时: 稳定性阈值上界
+    robust_limit: str = ""      # 稳定性阈值: 望大=稳定要求最小值, 望小=稳定要求最大值
     unit: str = ""
 
 
 @dataclass
 class FactorItem:
     name: str = ""
-    mode: str = "连续"
-    source: str = "设计"
-    uncertainty: str = "区间"      # 区间 或 概率
-    distribution: str = "无"       # 正态分布, 均匀分布, 等
+    source: str = "设计"        # 设计 / 环境
+    uncertainty: str = "区间"   # 区间 或 概率
+    distribution: str = "无"    # 正态分布, 均匀分布, 等
     param1: str = ""            # 区间下限 或 概率均值
     param2: str = ""            # 区间上限 或 概率方差
+    fixed_value: str = ""       # 固定后的均值或区间中点
+    is_fixed: bool = False
     unit: str = ""
 
 
 @dataclass
 class ProjectData:
-    experiment_type: str = "实际实验" # 实际实验 或 仿真实验
     responses: list[ResponseItem] = field(default_factory=list)
     factors: list[FactorItem] = field(default_factory=list)
     
