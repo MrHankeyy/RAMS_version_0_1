@@ -1,0 +1,11 @@
+# User-specified versions
+PyQt6==6.11.0
+pyqtgraph==0.14.0
+numpy==2.2.6
+pandas==2.3.3
+
+# Additional project dependencies (versions not yet pinned)
+matplotlib
+
+# SVR and neural network models (recommended; code includes fallbacks)
+scikit-learn
