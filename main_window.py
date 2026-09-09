@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QWidget, QPushButton, QVBoxLayout, QHBoxLayout, 
-    QStackedWidget, QLabel, QMainWindow, QMenu, QSizePolicy
+    QStackedWidget, QLabel, QMainWindow, QMenu, QSizePolicy, QApplication
 )
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtCore import Qt
@@ -20,8 +20,12 @@ class MainWindow(QMainWindow):
         self.project_data = ProjectData()
 
         self.setWindowTitle("鲁棒优化管理系统")
-        self.resize(1000, 650)
+        self.resize(1360, 860)
         self.setWindowIcon(QIcon("icon.png"))
+        font = self.font()
+        font.setFamily("Microsoft YaHei")
+        font.setPointSize(10)
+        QApplication.instance().setFont(font)
 
         self._build_ui()
 
@@ -67,6 +71,19 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         
         central_widget.setObjectName("central_widget")
+        central_widget.setStyleSheet("""
+        QWidget#central_widget { background: #f4f6f9; }
+        QTabWidget::pane { border: 1px solid #cdd6e0; background: #ffffff;
+                           border-radius: 4px; }
+        QTabBar::tab { padding: 6px 12px; background: #e9eef4;
+                       border: 1px solid #cdd6e0; border-bottom: none; }
+        QTabBar::tab:selected { background: #ffffff; font-weight: bold; }
+        QGroupBox { margin-top: 14px; font-weight: bold; color: #1f2937; }
+        QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 6px; }
+        QTableWidget { gridline-color: #dde4ec; alternate-background-color: #f8fafc; }
+        QHeaderView::section { background: #eef2f7; padding: 5px; border: 1px solid #d6dee8; }
+        QPushButton { border-radius: 4px; }
+        """)
     
     def _build_menu_bar(self):
         menu_bar = self.menuBar()
@@ -155,8 +172,8 @@ class MainWindow(QMainWindow):
             border: 1px solid #bbb;
             background-color: #f0f0f0;
             font-weight: bold;
-            padding: 8px;
-            font-size: 20px;
+            padding: 7px;
+            font-size: 15px;
         }
 
         /* 鼠标悬停 */
@@ -175,7 +192,7 @@ class MainWindow(QMainWindow):
             font-weight: bold;
         }
         """)
-        widget.setFixedHeight(50)
+        widget.setFixedHeight(52)
         
         return widget
     
@@ -219,6 +236,7 @@ class MainWindow(QMainWindow):
         temp_label = QLabel('这是主项目浏览器') #临时标签，后续接入主项目浏览器后去除
         temp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(temp_label)
+        widget.setFixedWidth(230)
 
         widget.setStyleSheet("""
         #project_explorer {
@@ -236,6 +254,7 @@ class MainWindow(QMainWindow):
         temp_label = QLabel('这是消息面板') #临时标签，后续接入消息面板后去除
         temp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(temp_label)
+        widget.setMinimumHeight(90)
 
         widget.setStyleSheet("""
         #message_panel {

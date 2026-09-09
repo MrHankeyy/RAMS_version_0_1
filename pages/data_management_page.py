@@ -163,7 +163,7 @@ class DataManagementPage(QWidget):
                 
                 # 如果是因子列或者是ID，设为只读并标背色；
                 # 如果是响应列，允许编辑以便填入结果
-                if col_name in factors or col_name == "Run_ID":
+                if col_name in factors or col_name == "Run_ID" or col_name.startswith(("内表", "外表")):
                     item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
                     item.setBackground(QtGui.QColor("#e9ecef"))
                 elif col_name in responses:
