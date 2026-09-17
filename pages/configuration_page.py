@@ -2,7 +2,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QComboBox, QPushButton, QGroupBox, QTextEdit, QSpinBox,
-    QDoubleSpinBox, QMessageBox
+    QDoubleSpinBox, QMessageBox, QStackedWidget, QSizePolicy
 )
 
 import doe_engine as engine
@@ -31,7 +31,11 @@ class ConfigurationPage(QWidget):
         main_layout.addWidget(info_group)
 
         design_group = QGroupBox("方案与设计方法选择")
+        design_group.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         design_layout = QVBoxLayout()
+        design_layout.setContentsMargins(12, 10, 12, 10)
+        design_layout.setSpacing(8)
         design_layout.addWidget(QLabel("核心设计方法："))
         self.method_combo = QComboBox()
         self.method_combo.addItems([
@@ -44,9 +48,9 @@ class ConfigurationPage(QWidget):
         ])
         design_layout.addWidget(self.method_combo)
 
-        self.dynamic_params_widget = QWidget()
-        self.dynamic_layout = QVBoxLayout(self.dynamic_params_widget)
-        self.dynamic_layout.setContentsMargins(0, 0, 0, 0)
+        self.dynamic_params_widget = QStackedWidget()
+        self.dynamic_params_widget.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         self.screening_widget = self._build_screening_widget()
         self.rsm_widget = self._build_rsm_widget()
@@ -55,7 +59,13 @@ class ConfigurationPage(QWidget):
 
         for w in (self.screening_widget, self.rsm_widget,
                   self.taguchi_widget, self.surrogate_widget):
-            self.dynamic_layout.addWidget(w)
+            w.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            w.setStyleSheet(
+                "QWidget { background:#f7f9fc; border:1px solid #d8e0ea; "
+                "border-radius:4px; } QLabel { border:0; background:transparent; "
+                "color:#334155; } QComboBox, QSpinBox, QDoubleSpinBox { "
+                "min-height:24px; padding:2px 6px; }")
+            self.dynamic_params_widget.addWidget(w)
         design_layout.addWidget(self.dynamic_params_widget)
 
         self.preview_label = QLabel("尚未估算试验次数")
@@ -64,7 +74,9 @@ class ConfigurationPage(QWidget):
 
         self.desc_text = QTextEdit()
         self.desc_text.setReadOnly(True)
-        self.desc_text.setMaximumHeight(110)
+        self.desc_text.setFixedHeight(72)
+        self.desc_text.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         design_layout.addWidget(self.desc_text)
 
         design_group.setLayout(design_layout)
@@ -85,8 +97,19 @@ class ConfigurationPage(QWidget):
         self.setLayout(main_layout)
         self._connect_preview_signals()
         self.method_combo.currentTextChanged.connect(self._on_method_changed)
+        self.dynamic_params_widget.currentChanged.connect(
+            lambda _index: self._fit_dynamic_params())
         self.update_info_display()
         self._on_method_changed(self.method_combo.currentText())
+
+    def _fit_dynamic_params(self):
+        """让堆叠容器只占当前参数页需要的高度。"""
+        current = self.dynamic_params_widget.currentWidget()
+        if current is None:
+            return
+        current.adjustSize()
+        height = max(current.sizeHint().height(), current.minimumSizeHint().height())
+        self.dynamic_params_widget.setFixedHeight(height + 2)
 
     # ------------------------------------------------------------- 控件构建
     def _build_screening_widget(self):
@@ -297,10 +320,15 @@ class ConfigurationPage(QWidget):
             spin.valueChanged.connect(self._refresh_preview)
 
     def _on_method_changed(self, text):
-        self.screening_widget.setVisible("筛选" in text)
-        self.rsm_widget.setVisible("响应曲面" in text)
-        self.taguchi_widget.setVisible("田口" in text)
-        self.surrogate_widget.setVisible("代理模型" in text)
+        if "筛选" in text:
+            self.dynamic_params_widget.setCurrentWidget(self.screening_widget)
+        elif "响应曲面" in text:
+            self.dynamic_params_widget.setCurrentWidget(self.rsm_widget)
+        elif "田口" in text:
+            self.dynamic_params_widget.setCurrentWidget(self.taguchi_widget)
+        else:
+            self.dynamic_params_widget.setCurrentWidget(self.surrogate_widget)
+        self._fit_dynamic_params()
         self._update_surrogate_labels(text)
         self._set_description(text)
         self._refresh_preview()

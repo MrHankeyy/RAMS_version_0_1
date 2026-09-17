@@ -38,6 +38,14 @@ def factor_limits(factor):
     """返回 (下限, 上限)，保证 low<=high。"""
     lo = _num(getattr(factor, "param1", None))
     hi = _num(getattr(factor, "param2", None))
+    if getattr(factor, "uncertainty", "区间") == "概率":
+        mean = lo
+        variance = max(0.0, hi)
+        if getattr(factor, "distribution", "") == "均匀分布":
+            half_width = math.sqrt(3.0 * variance)
+        else:
+            half_width = 3.0 * math.sqrt(variance)
+        lo, hi = mean - half_width, mean + half_width
     if hi < lo:
         lo, hi = hi, lo
     if hi == lo:
@@ -374,12 +382,58 @@ def build_taguchi(control_factors, noise_factors, inner_label, outer_label,
 
 
 # ---------------------------------------------------------------- 空间填充抽样
+def _latin_hypercube(n_points, dimensions, rng):
+    strata = [[(i + rng.random()) / n_points for i in range(n_points)]
+              for _ in range(dimensions)]
+    for values in strata:
+        rng.shuffle(values)
+    return [[strata[col][row] for col in range(dimensions)]
+            for row in range(n_points)]
+
+
+def _maximin_lhs(n_points, dimensions, rng, candidates=12):
+    """用小规模候选搜索提高 LHS 的空间分散性，避免依赖 scipy。"""
+    best = None
+    best_score = -1.0
+    for _ in range(candidates):
+        points = _latin_hypercube(n_points, dimensions, rng)
+        score = min(
+            sum((a - b) ** 2 for a, b in zip(left, right))
+            for i, left in enumerate(points)
+            for right in points[i + 1:]
+        ) if n_points > 1 else 1.0
+        if score > best_score:
+            best_score, best = score, points
+    return best
+
+
+def _van_der_corput(index, base):
+    value, factor = 0.0, 1.0 / base
+    while index:
+        index, remainder = divmod(index, base)
+        value += remainder * factor
+        factor /= base
+    return value
+
+
+def _sobol_like(n_points, dimensions):
+    """优先使用 scipy 的 Sobol；无 scipy 时回退到确定性的低差异序列。"""
+    try:
+        from scipy.stats import qmc  # type: ignore
+        return qmc.Sobol(d=dimensions, scramble=False).random(n_points).tolist()
+    except Exception:
+        pass
+    bases = [2, 3, 5, 7, 11, 13, 17, 19]
+    return [[_van_der_corput(index + 1, bases[col % len(bases)])
+             for col in range(dimensions)] for index in range(n_points)]
+
+
 def build_samples(factors, n_points: int, method: str, seed: int):
-    """代理模型试验样本（设计因子取值点）。method: LHS / 均匀网格 / 随机。"""
+    """代理模型试验样本（LHS、最优 LHS、Sobol、网格、稀疏网格或随机）。"""
     rng = random.Random(seed)
     k = len(factors)
     rows = []
-    if method == "均匀网格" and k <= 4 and n_points >= 2 ** k:
+    if method in ("均匀网格抽样", "均匀网格") and k <= 4 and n_points >= 2 ** k:
         side = max(2, int(round(n_points ** (1.0 / k))))
         points = [lo + (hi - lo) * (t / max(side - 1, 1))
                   for (_, lo, hi, _) in factors for t in range(side)]
@@ -389,14 +443,37 @@ def build_samples(factors, n_points: int, method: str, seed: int):
             combos = rng.sample(combos, n_points)
         for combo in combos:
             rows.append({factors[i][0]: combo[i] for i in range(k)})
-    elif method == "Latin Hypercube (LHS)":
-        strata = [sorted((i + rng.random()) / n_points for i in range(n_points)) for _ in range(k)]
-        for s in range(n_points):
-            row = {}
-            for i, (name, lo, hi, _) in enumerate(factors):
-                t = strata[i][s]
-                row[name] = lo + t * (hi - lo)
-            rows.append(row)
+    elif method in ("Latin Hypercube (LHS)", "最优 LHS"):
+        points = (_maximin_lhs(n_points, k, rng)
+                  if method == "最优 LHS" else _latin_hypercube(n_points, k, rng))
+        for point in points:
+            rows.append({name: lo + point[i] * (hi - lo)
+                         for i, (name, lo, hi, _) in enumerate(factors)})
+    elif method in ("低差异序列 SOBOL", "SOBOL（低差异序列）"):
+        for point in _sobol_like(n_points, k):
+            rows.append({name: lo + point[i] * (hi - lo)
+                         for i, (name, lo, hi, _) in enumerate(factors)})
+    elif method == "稀疏配点法":
+        # 每次只激活少量维度，覆盖中心、轴向及低阶组合点。
+        center = [0.5] * k
+        unit_points = [center]
+        for i in range(k):
+            for value in (0.0, 1.0):
+                point = list(center)
+                point[i] = value
+                unit_points.append(point)
+        for i, j in itertools.combinations(range(k), 2):
+            point = list(center)
+            point[i], point[j] = 0.0, 1.0
+            unit_points.append(point)
+        while len(unit_points) < n_points:
+            point = list(center)
+            for i in rng.sample(range(k), min(2, k)):
+                point[i] = rng.choice((0.0, 1.0))
+            unit_points.append(point)
+        for point in unit_points[:n_points]:
+            rows.append({name: lo + point[i] * (hi - lo)
+                         for i, (name, lo, hi, _) in enumerate(factors)})
     else:  # 随机抽样
         for _ in range(n_points):
             rows.append({name: lo + rng.random() * (hi - lo) for name, lo, hi, _ in factors})
@@ -545,6 +622,16 @@ def train_kriging(Xtr, ytr, Xte, correlation="Gaussian", trend="常数"):
             return (1 + s) * _np.exp(-s)
         return _np.exp(-d2 * theta)  # Gaussian / Power(p=2)
 
+    def trend_matrix(values):
+        columns = [_np.ones(len(values))]
+        if "一次" in trend or "二次" in trend:
+            columns.extend(values[:, j] for j in range(values.shape[1]))
+        if "二次" in trend:
+            columns.extend(values[:, j] ** 2 for j in range(values.shape[1]))
+        return _np.column_stack(columns)
+
+    Ftr = trend_matrix(xz)
+    Fte = trend_matrix(tz)
     best = None
     for theta in (0.05, 0.2, 0.5, 1.0, 2.0, 5.0):
         R = corr(xz, xz, theta) + _np.eye(n) * 1e-8
@@ -552,25 +639,26 @@ def train_kriging(Xtr, ytr, Xte, correlation="Gaussian", trend="常数"):
             L = _np.linalg.cholesky(R)
         except Exception:
             continue
-        one = _np.ones(n)
-        linv_y = _np.linalg.solve(L.T, _np.linalg.solve(L, ytr))
-        linv_one = _np.linalg.solve(L.T, _np.linalg.solve(L, one))
-        mu = float(one @ linv_y / (one @ linv_one))
-        res = ytr - mu
+        r_inv_y = _np.linalg.solve(R, ytr)
+        r_inv_f = _np.linalg.solve(R, Ftr)
+        beta = _np.linalg.solve(Ftr.T @ r_inv_f, Ftr.T @ r_inv_y)
+        res = ytr - Ftr @ beta
         log_like = -_np.sum(_np.log(_np.diag(L))) - 0.5 * float(res @ _np.linalg.solve(R, res))
         if best is None or log_like > best[0]:
             best = (log_like, theta, R)
     _loglike, theta, R = best
-    one = _np.ones(n)
-    mu = float(one @ _np.linalg.solve(R, ytr) / (one @ _np.linalg.solve(R, one)))
-    w = _np.linalg.solve(R, ytr - mu)
+    r_inv_y = _np.linalg.solve(R, ytr)
+    r_inv_f = _np.linalg.solve(R, Ftr)
+    beta = _np.linalg.solve(Ftr.T @ r_inv_f, Ftr.T @ r_inv_y)
+    w = _np.linalg.solve(R, ytr - Ftr @ beta)
     rte = corr(xz, tz, theta)
-    pred = mu + rte.T @ w
+    pred = Fte @ beta + rte.T @ w
     return {"params": {"theta": theta, "correlation": corr_label, "trend": trend},
             "predicted": [float(v) for v in pred]}
 
 
-def train_svr(Xtr, ytr, Xte, kernel="RBF", c_min=0.1, c_max=10.0, c_step=1.0,
+def train_svr(Xtr, ytr, Xte, kernel="RBF", poly_degree=3,
+              c_min=0.1, c_max=10.0, c_step=1.0,
               g_min=0.01, g_max=10.0, g_step=1.0):
     """SVR 训练。
 
@@ -598,16 +686,19 @@ def train_svr(Xtr, ytr, Xte, kernel="RBF", c_min=0.1, c_max=10.0, c_step=1.0,
         best, best_err = None, float("inf")
         for c in grid_range(c_min, c_max, c_step):
             for gamma in grid_range(g_min, g_max, g_step):
-                model = SVR(kernel=kernel_arg, C=c, gamma=gamma, epsilon=0.05)
+                model = SVR(kernel=kernel_arg, degree=int(poly_degree), C=c,
+                            gamma=gamma, epsilon=0.05)
                 model.fit(Xtr, ytr)
                 pred = model.predict(Xtr if len(ytr) <= 60 else Xte)
                 err = float(_np.mean((pred - ytr) ** 2))
                 if err < best_err:
                     best_err, best = err, (c, gamma)
         c, gamma = best
-        model = SVR(kernel=kernel_arg, C=c, gamma=gamma, epsilon=0.05)
+        model = SVR(kernel=kernel_arg, degree=int(poly_degree), C=c,
+                gamma=gamma, epsilon=0.05)
         model.fit(Xtr, ytr)
         return {"params": {"kernel": kernel, "C": c, "gamma": gamma,
+                   "poly_degree": int(poly_degree),
                            "solver": "scikit-learn SVR"},
                 "predicted": [float(v) for v in model.predict(Xte)]}
     except Exception:
@@ -626,6 +717,7 @@ def train_svr(Xtr, ytr, Xte, kernel="RBF", c_min=0.1, c_max=10.0, c_step=1.0,
                     best_pred = _kernel_rbf(Xtr, Xte, gamma).T @ alpha
         return {"params": {"kernel": kernel, "C": best_params[0],
                            "gamma": best_params[1],
+                   "poly_degree": int(poly_degree),
                            "solver": "核岭回归 KRR（未安装 scikit-learn 的 SVR 近似）"},
                 "predicted": [float(v) for v in best_pred]}
 

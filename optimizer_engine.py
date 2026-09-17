@@ -223,10 +223,15 @@ def build_models(project):
 def _sigma_of_factor(f, k_design):
     """因子不确定性标准差。"""
     lo, hi = de.factor_limits(f)
+    if f.uncertainty == "概率":
+        try:
+            return max(0.0, float(f.param2)) ** 0.5
+        except (TypeError, ValueError):
+            return (hi - lo) / 6.0
     if f.source == "环境":
         if f.uncertainty == "概率":
             try:
-                return (float(f.param2) ** 0.5) * 0.5  # 将“方差”当作半宽处理
+                return float(f.param2) ** 0.5
             except (TypeError, ValueError):
                 return (hi - lo) / math.sqrt(12)
         return (hi - lo) / math.sqrt(12)
@@ -298,7 +303,10 @@ def _desirability(resp, mu, data_min, data_max):
         if hi <= lo:
             hi = lo + 1.0
         return max(0.0, min(1.0, (hi - mu) / (hi - lo)))
-    lo, hi = _response_ref(resp)
+    ref = _response_ref(resp)
+    if not isinstance(ref, tuple) or len(ref) != 2:
+        return 0.5
+    lo, hi = ref
     if lo is None or hi is None:
         return 0.5
     target = (lo + hi) / 2.0
@@ -316,7 +324,10 @@ def _constraint_limits(resp):
     if resp.feature == "望大":
         ref = _response_ref(resp)
         return ("lower", ref) if ref is not None else ("lower", None)
-    lo, hi = _response_ref(resp)
+    ref = _response_ref(resp)
+    if not isinstance(ref, tuple) or len(ref) != 2:
+        return ("both", (None, None))
+    lo, hi = ref
     return ("both", (lo, hi)) if lo is not None and hi is not None else ("both", (None, None))
 
 
@@ -395,8 +406,9 @@ def self_is_constraint(resp):
         ref = _response_ref(resp)
         return ref is not None
     if resp.feature == "望目":
-        lo, hi = _response_ref(resp)
-        return lo is not None and hi is not None
+        ref = _response_ref(resp)
+        return (isinstance(ref, tuple) and len(ref) == 2
+            and ref[0] is not None and ref[1] is not None)
     return False
 
 

@@ -77,7 +77,10 @@ class SurrogateDialog(QDialog):
         self.doe_method_combo = QComboBox()
         self.doe_method_combo.addItems([
             "Latin Hypercube (LHS)",
+            "最优 LHS",
+            "低差异序列 SOBOL",
             "均匀网格抽样",
+            "稀疏配点法",
             "随机抽样",
         ])
         row1.addWidget(self.doe_method_combo)
