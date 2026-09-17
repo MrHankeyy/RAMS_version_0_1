@@ -9,3 +9,4 @@ matplotlib
 
 # SVR and neural network models (recommended; code includes fallbacks)
 scikit-learn
+openpyxl

@@ -1,4 +1,4 @@
-from PyQt6.QtCore import Qt, QRect, QSize
+from PyQt6.QtCore import Qt, QRect, QSize, pyqtSignal
 from PyQt6.QtGui import QPainter, QPen, QColor, QPalette
 from PyQt6.QtWidgets import (
     QWidget, QPushButton, QLabel, QVBoxLayout, QHBoxLayout,
@@ -76,6 +76,8 @@ class MultiLevelHeader(QHeaderView):
 
 
 class ModelingPage(QWidget):
+    model_saved = pyqtSignal()
+
     def __init__(self, project_data: ProjectData):
         super().__init__()
         self.project_data = project_data
@@ -93,8 +95,8 @@ class ModelingPage(QWidget):
         response_layout.setContentsMargins(10, 12, 10, 10)
 
         response_btn_layout = QHBoxLayout()
-        self.response_add_btn = QPushButton("+")
-        self.response_add_btn.setFixedWidth(35)
+        self.response_add_btn = QPushButton("+  新增响应")
+        self.response_add_btn.setMinimumWidth(112)
         self.response_add_btn.clicked.connect(self.add_response_row)
         response_btn_layout.addWidget(self.response_add_btn)
         response_btn_layout.addStretch()
@@ -142,9 +144,15 @@ class ModelingPage(QWidget):
         btn_layout.addStretch()
         self.save_btn = QPushButton("保存业务模型数据")
         self.save_btn.setMinimumWidth(150)
+        self.save_btn.setObjectName("save_model_btn")
         self.save_btn.clicked.connect(self.on_save_clicked)
         btn_layout.addWidget(self.save_btn)
         main_layout.addLayout(btn_layout)
+
+        self.save_status_label = QLabel("修改后请保存业务模型数据")
+        self.save_status_label.setObjectName("save_status_label")
+        self.save_status_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        main_layout.addWidget(self.save_status_label)
 
         self.setLayout(main_layout)
         self.setStyleSheet("""
@@ -163,6 +171,27 @@ class ModelingPage(QWidget):
             border-radius: 5px;
             background: #ffffff;
         }
+        #response_group QPushButton, #factor_group QPushButton {
+            border: 1px solid #9bb8d3;
+            border-radius: 4px;
+            background: #eaf3fb;
+            color: #174a73;
+            padding: 5px 12px;
+            font-weight: bold;
+        }
+        #response_group QPushButton:hover, #factor_group QPushButton:hover {
+            background: #d7eafb;
+        }
+        #save_model_btn {
+            border: 1px solid #1f75b5;
+            border-radius: 4px;
+            background: #2478b8;
+            color: white;
+            padding: 7px 18px;
+            font-weight: bold;
+        }
+        #save_model_btn:hover { background: #1b639b; }
+        #save_status_label { color: #64748b; padding-right: 4px; }
         QTableWidget {
             gridline-color: #d9e0e7;
             alternate-background-color: #f7f9fb;
@@ -180,6 +209,11 @@ class ModelingPage(QWidget):
             return
 
         self.sync_to_project_data()
+        self.model_saved.emit()
+        self.save_status_label.setText(
+            f"已保存：{len(self.project_data.responses)} 个响应，"
+            f"{len(self.project_data.factors)} 个因子")
+        self.save_status_label.setStyleSheet("color:#16803c; font-weight:bold;")
 
         # 演示：打印收集到的数据（模拟传递给后端算法）
         print("======== 业务建模数据已保存 ========")
@@ -326,7 +360,8 @@ class ModelingPage(QWidget):
         header = QHBoxLayout()
         label = QLabel(title)
         label.setStyleSheet("font-size: 16px; font-weight: bold; color: #34495e;")
-        add_button = QPushButton("+ 新增因子")
+        add_button = QPushButton("+  新增因子")
+        add_button.setMinimumWidth(112)
         add_button.clicked.connect(add_handler)
         header.addWidget(label)
         header.addStretch()
@@ -348,6 +383,7 @@ class ModelingPage(QWidget):
         self._create_continuous_block(table, row, 1, 2, 3, 4)
 
         fixed_btn = QPushButton("固定值")
+        fixed_btn.setCheckable(True)
         fixed_btn.clicked.connect(lambda _, t=table, r=row: self._fix_factor_value(t, r))
         table.setCellWidget(row, 5, fixed_btn)
         table.setCellWidget(row, 6, QLineEdit())
@@ -400,10 +436,17 @@ class ModelingPage(QWidget):
         except ValueError:
             fixed_value = ""
         button = table.cellWidget(row, 5)
-        if fixed_value and button:
+        if not button:
+            return
+        if fixed_value and button.isChecked():
             button.setText(f"已固定: {fixed_value}")
             button.setProperty("fixed_value", fixed_value)
             button.setStyleSheet("background-color: #d8f3dc; color: #1b4332;")
+        else:
+            button.setChecked(False)
+            button.setText("固定值")
+            button.setProperty("fixed_value", "")
+            button.setStyleSheet("")
 
     def _delete_factor_row(self, table, row):
         if 0 <= row < table.rowCount():

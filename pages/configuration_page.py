@@ -23,12 +23,21 @@ class ConfigurationPage(QWidget):
         main_layout.setContentsMargins(12, 12, 12, 12)
         main_layout.setSpacing(12)
 
-        info_group = QGroupBox("当前业务模型配置")
+        self.info_group = QGroupBox("当前业务模型配置")
+        self.info_group.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         info_layout = QVBoxLayout()
+        info_layout.setContentsMargins(10, 8, 10, 8)
+        info_layout.setSpacing(3)
         self.info_label = QLabel()
+        self.info_label.setWordWrap(True)
+        self.info_label.setMinimumHeight(34)
+        self.info_label.setStyleSheet(
+            "color:#334155; background:#f7f9fc; border:1px solid #d8e0ea; "
+            "border-radius:4px; padding:6px 10px;")
         info_layout.addWidget(self.info_label)
-        info_group.setLayout(info_layout)
-        main_layout.addWidget(info_group)
+        self.info_group.setLayout(info_layout)
+        main_layout.addWidget(self.info_group)
 
         design_group = QGroupBox("方案与设计方法选择")
         design_group.setSizePolicy(
@@ -93,6 +102,7 @@ class ConfigurationPage(QWidget):
         btn_layout.addWidget(self.refresh_btn)
         btn_layout.addWidget(self.gen_btn)
         main_layout.addLayout(btn_layout)
+        main_layout.addStretch(1)
 
         self.setLayout(main_layout)
         self._connect_preview_signals()
