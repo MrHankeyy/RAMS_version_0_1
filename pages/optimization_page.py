@@ -63,7 +63,7 @@ class OptimizationPage(QWidget):
         self.run_all_btn = QPushButton("执行稳定性设计与鲁棒优化")
         self.run_all_btn.setMinimumWidth(260)
         self.run_all_btn.setStyleSheet("font-weight:bold;background-color:#1d4ed8;color:white;")
-        self.run_all_btn.clicked.connect(self.run_workbench)
+        self.run_all_btn.clicked.connect(self._run_primary_action)
         top.addWidget(self.run_all_btn)
         main_layout.addLayout(top)
 
@@ -90,6 +90,38 @@ class OptimizationPage(QWidget):
 
         self.setLayout(main_layout)
         self._oe_context = None
+        self._update_method_actions()
+
+    def _update_method_actions(self):
+        """按方案类型切换主动作，避免把筛选/田口误导成鲁棒优化。"""
+        method = self._method()
+        is_screening = "筛选" in method
+        is_taguchi = "田口" in method
+        is_special = is_screening or is_taguchi
+        if is_screening:
+            self.run_all_btn.setText("筛选设计：计算主效应")
+            self.run_btn.setText("计算筛选主效应")
+        elif is_taguchi:
+            self.run_all_btn.setText("田口设计：计算信噪比")
+            self.run_btn.setText("计算田口信噪比")
+        else:
+            self.run_all_btn.setText("执行稳定性设计与鲁棒优化")
+            self.run_btn.setText("更新方案汇总")
+        self.tabs.setTabEnabled(1, not is_special)
+        self.run_all_btn.setToolTip(
+            "筛选设计只计算因子敏感度，不执行优化"
+            if is_screening else
+            "田口设计根据内表×外表响应计算 S/N 并推荐稳健水平"
+            if is_taguchi else
+            "响应曲面和代理模型进入鲁棒优化工作台")
+
+    def _run_primary_action(self):
+        """顶部主按钮：筛选/田口走专用分析，其余方案走鲁棒优化。"""
+        method = self._method()
+        if "筛选" in method or "田口" in method:
+            self.run_optimization()
+        else:
+            self.run_workbench()
 
     def _build_overview_tab(self):
         layout = QVBoxLayout(self.tab_overview)
@@ -248,6 +280,7 @@ class OptimizationPage(QWidget):
 
     # ------------------------------------------------------------- 视图调度
     def _refresh_view(self, text):
+        self._update_method_actions()
         if "方案设计摘要" in text:
             self.result_text.setPlainText(self._summary_text())
         elif "筛选" in text:
@@ -309,6 +342,9 @@ class OptimizationPage(QWidget):
             lines.append(f"  {item.get('rank')}. {item.get('name')} — {item.get('share', 0)}%")
         lines.append("")
         lines.append(result.get("conclusion", ""))
+        if not result.get("response_effects"):
+            lines.append("")
+            lines.append("当前排序仅为输入范围先验，不能替代响应数据计算的真实敏感度。")
         return "\n".join(lines)
 
     def _rsm_text(self):
@@ -353,7 +389,11 @@ class OptimizationPage(QWidget):
         lines = ["【田口稳健设计结果】"]
         lines.append(f"内表 {result.get('array_name', '')} × 外表 {result.get('outer_label', '无')}"
                      f"｜ 因子水平数 {result.get('levels', 2)}")
+        if result.get("metric_label"):
+            lines.append(f"指标：{result['metric_label']}")
         lines.append(result.get("summary", ""))
+        if result.get("analysis_status"):
+            lines.append(f"状态：{result['analysis_status']}")
         lines.append("")
         snr_rows = result.get("signal_to_noise") or []
         if snr_rows:
@@ -367,7 +407,7 @@ class OptimizationPage(QWidget):
             lines.append(result.get("recommendation", ""))
         else:
             lines.append(result.get("recommendation", ""))
-            lines.append("提示：填入/导入响应数据后可自动计算均值响应表与 S/N 表。")
+            lines.append("提示：填入/导入全部响应数据后，点击“计算田口信噪比”生成稳健水平推荐。")
         return "\n".join(lines)
 
     def _surrogate_text(self):
@@ -419,6 +459,16 @@ class OptimizationPage(QWidget):
             return
         self.status_label.setText("分析完成：结果已更新")
         self._refresh_view(self.view_combo.currentText())
+        if "筛选" in method:
+            self.tabs.setCurrentIndex(0)
+            self.view_combo.setCurrentText("筛选设计结果")
+            self.result_text.setPlainText(self._screening_text())
+            return
+        if "田口" in method:
+            self.tabs.setCurrentIndex(0)
+            self.view_combo.setCurrentText("田口稳健结果")
+            self.result_text.setPlainText(self._taguchi_text())
+            return
         QMessageBox.information(
             self, "分析完成",
             "后端分析已完成，结果已写入当前数据模型。可在上方切换结果视图，"
@@ -456,6 +506,12 @@ class OptimizationPage(QWidget):
             result["main_effects"] = ranking[:8]
             result["response_effects"] = resp_effects
             result["conclusion"] = "基于已填响应计算：主效应排序见上，显著因子建议进入下一轮建模。"
+            self.project_data.screening_result = result
+        else:
+            result["response_effects"] = {}
+            result["conclusion"] = (
+                "尚未计算真实主效应：请在【数据管理】填入每个响应的完整数据后，"
+                "再次点击“计算筛选主效应”。")
             self.project_data.screening_result = result
 
     # ------------------------------------------------------------- 响应曲面
@@ -514,14 +570,15 @@ class OptimizationPage(QWidget):
         vals = [float(v) for v in values]
         if not vals:
             return None
-        positive = [v for v in vals if v > 0] or vals
-        mean = statistics.mean(positive)
-        var = statistics.variance(positive) if len(positive) > 1 else 0.0
+        mean = statistics.mean(vals)
+        var = statistics.variance(vals) if len(vals) > 1 else 0.0
         if snr_type == "望大":
-            inv = [1.0 / v for v in positive]
-            return round(10 * math.log10(1.0 / (sum(v * v for v in inv) / len(inv)) + 1e-12), 4)
+            mean_inverse_square = statistics.mean(
+                1.0 / max(v * v, 1e-24) for v in vals)
+            return round(-10 * math.log10(mean_inverse_square), 4)
         if snr_type == "望小":
-            return round(-10 * math.log10(sum(v * v for v in positive) / len(positive) + 1e-12), 4)
+            mean_square = statistics.mean(v * v for v in vals)
+            return round(-10 * math.log10(max(mean_square, 1e-24)), 4)
         return round(10 * math.log10(mean * mean / (var + 1e-12) + 1e-12), 4)
 
     def _run_taguchi(self):
@@ -529,13 +586,17 @@ class OptimizationPage(QWidget):
         matrix = self._matrix()
         groups = result.get("groups")
         if not groups or len(groups) != len(matrix):
+            self.project_data.taguchi_result["analysis_status"] = (
+                "试验分组信息不完整，无法计算 S/N；请重新生成田口方案。")
             return
         params = self.project_data.design_params or {}
         mode = params.get("snr_mode", "按各响应目标特征自动")
         level_maps = result.get("factor_levels") or {}
         has_outer = result.get("has_outer", False)
+        result["metric_label"] = "信噪比 S/N" if has_outer else "内表均值响应（无外表）"
         inner_count = result.get("inner_runs", 1)
         per_resp_level_snr = {}
+        incomplete_responses = []
 
         for resp in self._responses():
             snr_type = self._snr_type(resp, mode)
@@ -549,6 +610,7 @@ class OptimizationPage(QWidget):
                     break
                 inner_values[int(g["inner"])].append(y)
             if not filled:
+                incomplete_responses.append(resp.name)
                 continue
             metrics = {}
             for i, vals in inner_values.items():
@@ -573,6 +635,10 @@ class OptimizationPage(QWidget):
             per_resp_level_snr[resp.name] = resp_table
 
         if not per_resp_level_snr:
+            result["analysis_status"] = (
+                "尚未完成 S/N 计算：请在【数据管理】填入每个响应的全部试验结果。")
+            result["signal_to_noise"] = []
+            self.project_data.taguchi_result = result
             return
         rows, best = [], {}
         for resp_name, factor_tables in per_resp_level_snr.items():
@@ -587,6 +653,12 @@ class OptimizationPage(QWidget):
         result["signal_to_noise"] = rows
         result["best_levels"] = best
         result["recommendation"] = recommendation + "。建议按该组合执行确认试验以验证稳健性。"
+        result["analysis_status"] = "S/N 计算完成：推荐水平来自各因子的最大 S/N。"
+        if not has_outer:
+            result["analysis_status"] = "无噪声外表：已按内表均值响应推荐水平，不执行 S/N 计算。"
+        if incomplete_responses:
+            result["analysis_status"] += (
+                f" 未完成响应：{', '.join(incomplete_responses)}。")
         self.project_data.taguchi_result = result
 
     # ------------------------------------------------------------- 代理模型
