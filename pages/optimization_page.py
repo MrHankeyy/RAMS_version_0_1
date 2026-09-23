@@ -766,7 +766,7 @@ class OptimizationPage(QWidget):
         start = (self._param_res or {}).get("recommended")
         if not start:
             d_inputs = oe.design_inputs(self._oe_context)
-            start = {f.name: sum(de.factor_limits(f)) / 2.0 for f in d_inputs}
+            start = {f.name: sum(engine.factor_limits(f)) / 2.0 for f in d_inputs}
         if "最陡上升" in tool:
             text, _path = oe.steepest_ascent(self._oe_context, start, kd)
         elif "EVOP" in tool:

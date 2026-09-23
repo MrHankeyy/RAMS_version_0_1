@@ -140,6 +140,8 @@ def _fit_model(X, y):
 def model_predict(model, x_raw):
     if not HAS_NUMPY:
         return None
+    if "predict_fn" in model:
+        return float(model["predict_fn"](_np.asarray(x_raw, float)))
     z = (_np.asarray(x_raw, float) - model["center"]) / model["half"]
     row = _design_row(z, model["terms"])
     return float(row @ model["coef"])
@@ -147,12 +149,16 @@ def model_predict(model, x_raw):
 
 def model_grad_x(model, x_raw):
     """梯度 wrt 原始单位 x。"""
+    if "grad_fn" in model:
+        return _np.asarray(model["grad_fn"](_np.asarray(x_raw, float)), float)
     z = (_np.asarray(x_raw, float) - model["center"]) / model["half"]
     gz = _quad_grad(model["terms"], model["coef"], z)
     return gz / model["half"]
 
 
 def model_hess_diag_x(model, x_raw):
+    if "hess_diag_fn" in model:
+        return _np.asarray(model["hess_diag_fn"](_np.asarray(x_raw, float)), float)
     z = (_np.asarray(x_raw, float) - model["center"]) / model["half"]
     hz = _quad_hess_diag(model["terms"], z)
     # 对 z 的二阶导转换：∂²f/∂x² = (1/h²)·∂²f/∂z²
@@ -371,7 +377,9 @@ def evaluate_design(context, x_design, k_design, weight_r, use_constraints=False
                     infeas_in += max(0.0, (mu + k_constraint * sigma) - hi)
             else:
                 infeas_in = 0.0
-            infeas += infeas_in / (abs(lim if isinstance(lim, (int, float)) else (lim[1] if lim else 1.0)) + 1e-9)
+            limit_scale = abs(lim if isinstance(lim, (int, float))
+                              else (lim[1] if lim else 0.0))
+            infeas += infeas_in / max(limit_scale, 1.0)
             resp_cons.append({"name": resp.name, "mu": mu, "sigma": sigma, "d": d})
         else:
             resp_objs.append({"name": resp.name, "mu": mu, "sigma": sigma, "d": d})
@@ -399,17 +407,9 @@ def project_responses(context):
 
 
 def self_is_constraint(resp):
-    kind = getattr(resp, "kind", "")
-    if "约束" in kind:
-        return True
-    if resp.feature == "望小":
-        ref = _response_ref(resp)
-        return ref is not None
-    if resp.feature == "望目":
-        ref = _response_ref(resp)
-        return (isinstance(ref, tuple) and len(ref) == 2
-            and ref[0] is not None and ref[1] is not None)
-    return False
+    # 稳定性阈值属于目标的望性参考，只有用户明确勾选“约束响应”
+    # 时才把该响应从目标集合移入约束集合。
+    return "约束" in getattr(resp, "kind", "")
 
 
 # ============================================================== NSGA-II
