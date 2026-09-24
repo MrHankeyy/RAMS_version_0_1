@@ -15,20 +15,20 @@ from openpyxl import load_workbook
 
 
 def f_obj(x1: float, x2: float) -> float:
-    """目标函数：陡峭深谷 A 与平缓浅谷 B 的组合。
-
-    A 是名义上更低但对输入扰动更敏感的局部区域，B 是较平缓的次优区域，
-    用于检验鲁棒优化是否会在均值性能与稳定性之间做出合理取舍。
-    """
-    valley_a = -10.0 * math.exp(-0.5 * ((x1 - 2.0) ** 2 + (x2 - 2.0) ** 2))
-    valley_b = -5.0 * math.exp(-0.05 * ((x1 - 7.0) ** 2 + (x2 - 7.0) ** 2))
-    background = 0.1 * (x1 - 5.0) ** 2 + 0.1 * (x2 - 5.0) ** 2 + 20.0
-    return valley_a + valley_b + background
+    """鲁棒优化校准目标：近边界窄深谷 + 远边界宽浅谷，目标为最小化。"""
+    background = 20.0 + 0.03 * ((x1 - 2.0) ** 2 + (x2 - 2.0) ** 2)
+    narrow = -8.0 * math.exp(
+        -0.5 * ((x1 - 3.9) ** 2 + (x2 - 3.9) ** 2) / 0.18 ** 2
+    )
+    broad = -11.5 * math.exp(
+        -0.5 * ((x1 - 2.0) ** 2 + (x2 - 2.0) ** 2) / 2.0 ** 2
+    )
+    return background + narrow + broad
 
 
 def g_constr(x1: float, x2: float) -> float:
-    """约束函数，满足 ``g(x) <= 0`` 的样本为可行样本。"""
-    return x1 + x2 - 3.4
+    """约束边界，满足 ``g(x) <= 0`` 的样本为可行样本。"""
+    return x1 + x2 - 8.0
 
 
 def _number(value, column_name: str, row_number: int) -> float:

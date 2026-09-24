@@ -633,7 +633,7 @@ def train_kriging(Xtr, ytr, Xte, correlation="Gaussian", trend="常数"):
     Ftr = trend_matrix(xz)
     Fte = trend_matrix(tz)
     best = None
-    for theta in (0.05, 0.2, 0.5, 1.0, 2.0, 5.0):
+    for theta in (0.05, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0):
         R = corr(xz, xz, theta) + _np.eye(n) * 1e-8
         try:
             L = _np.linalg.cholesky(R)
@@ -643,7 +643,9 @@ def train_kriging(Xtr, ytr, Xte, correlation="Gaussian", trend="常数"):
         r_inv_f = _np.linalg.solve(R, Ftr)
         beta = _np.linalg.solve(Ftr.T @ r_inv_f, Ftr.T @ r_inv_y)
         res = ytr - Ftr @ beta
-        log_like = -_np.sum(_np.log(_np.diag(L))) - 0.5 * float(res @ _np.linalg.solve(R, res))
+        # 集中似然同时估计过程方差，避免响应量纲左右相关长度选择。
+        variance = max(float(res @ _np.linalg.solve(R, res)) / n, 1e-30)
+        log_like = -_np.sum(_np.log(_np.diag(L))) - 0.5 * n * math.log(variance)
         if best is None or log_like > best[0]:
             best = (log_like, theta, R)
     _loglike, theta, R = best
@@ -653,8 +655,15 @@ def train_kriging(Xtr, ytr, Xte, correlation="Gaussian", trend="常数"):
     w = _np.linalg.solve(R, ytr - Ftr @ beta)
     rte = corr(xz, tz, theta)
     pred = Fte @ beta + rte.T @ w
+    # 保留模型的光滑预测；裁剪到样本响应范围会产生虚假的零梯度/零方差平台。
+    def predict_fn(values):
+        values = _np.asarray(values, float).reshape(1, -1)
+        scaled = values / span
+        trend_value = trend_matrix(scaled)
+        kernel_value = corr(xz, scaled, theta)
+        return float((trend_value @ beta + kernel_value.T @ w)[0])
     return {"params": {"theta": theta, "correlation": corr_label, "trend": trend},
-            "predicted": [float(v) for v in pred]}
+            "predicted": [float(v) for v in pred], "predict_fn": predict_fn}
 
 
 def train_svr(Xtr, ytr, Xte, kernel="RBF", poly_degree=3,
@@ -689,7 +698,7 @@ def train_svr(Xtr, ytr, Xte, kernel="RBF", poly_degree=3,
                 model = SVR(kernel=kernel_arg, degree=int(poly_degree), C=c,
                             gamma=gamma, epsilon=0.05)
                 model.fit(Xtr, ytr)
-                pred = model.predict(Xtr if len(ytr) <= 60 else Xte)
+                pred = model.predict(Xtr)
                 err = float(_np.mean((pred - ytr) ** 2))
                 if err < best_err:
                     best_err, best = err, (c, gamma)
@@ -697,10 +706,14 @@ def train_svr(Xtr, ytr, Xte, kernel="RBF", poly_degree=3,
         model = SVR(kernel=kernel_arg, degree=int(poly_degree), C=c,
                 gamma=gamma, epsilon=0.05)
         model.fit(Xtr, ytr)
+        def predict_fn(values):
+            value = _np.asarray(values, float).reshape(1, -1)
+            return float(model.predict(value)[0])
         return {"params": {"kernel": kernel, "C": c, "gamma": gamma,
                    "poly_degree": int(poly_degree),
                            "solver": "scikit-learn SVR"},
-                "predicted": [float(v) for v in model.predict(Xte)]}
+                "predicted": [float(v) for v in model.predict(Xte)],
+                "predict_fn": predict_fn}
     except Exception:
         # KRR 近似：核矩阵 + 岭回归，C 视为 1/λ 的缩放
         best_pred, best_err, best_params = None, float("inf"), (1.0, 1.0)
@@ -714,12 +727,17 @@ def train_svr(Xtr, ytr, Xte, kernel="RBF", poly_degree=3,
                 if err < best_err:
                     best_err = err
                     best_params = (c, gamma)
+                    best_alpha = alpha.copy()
                     best_pred = _kernel_rbf(Xtr, Xte, gamma).T @ alpha
+        def predict_fn(values):
+            value = _np.asarray(values, float).reshape(1, -1)
+            return float((_kernel_rbf(Xtr, value, best_params[1]).T @ best_alpha).item())
         return {"params": {"kernel": kernel, "C": best_params[0],
                            "gamma": best_params[1],
                    "poly_degree": int(poly_degree),
                            "solver": "核岭回归 KRR（未安装 scikit-learn 的 SVR 近似）"},
-                "predicted": [float(v) for v in best_pred]}
+                "predicted": [float(v) for v in best_pred],
+                "predict_fn": predict_fn}
 
 
 def train_ann(Xtr, ytr, Xte, hidden_layers=1, hidden_nodes=8, activation="sigmoid",
@@ -746,9 +764,12 @@ def train_ann(Xtr, ytr, Xte, hidden_layers=1, hidden_nodes=8, activation="sigmoi
                              learning_rate_init=float(learning_rate),
                              max_iter=int(epochs), random_state=7)
         model.fit(Xs, ys.ravel())
+        def predict_fn(values):
+            value = (_np.asarray(values, float).reshape(1, -1) - Xmean) / Xstd
+            return float(model.predict(value)[0] * ystd + ymean)
         pred = model.predict((Xte - Xmean) / Xstd) * ystd + ymean
         return {"params": {"layers": hidden, "solver": "scikit-learn MLP"},
-                "predicted": [float(v) for v in pred]}
+            "predicted": [float(v) for v in pred], "predict_fn": predict_fn}
     except Exception:
         rng = _np.random.default_rng(7)
         if node_search:
@@ -781,8 +802,12 @@ def train_ann(Xtr, ytr, Xte, hidden_layers=1, hidden_nodes=8, activation="sigmoi
             b2 += learning_rate * db2 / len(Xs)
         _, out = _ann_forward((Xte - Xmean) / Xstd, w1, b1, w2, b2, activation)
         pred = out[:, 0] * ystd + ymean
+        def predict_fn(values):
+            value = (_np.asarray(values, float).reshape(1, -1) - Xmean) / Xstd
+            _, result = _ann_forward(value, w1, b1, w2, b2, activation)
+            return float(result[0, 0] * ystd + ymean)
         return {"params": {"layers": tuple(layers), "solver": "numpy BP"},
-                "predicted": [float(v) for v in pred]}
+            "predicted": [float(v) for v in pred], "predict_fn": predict_fn}
 
 
 def train_surrogate(x_rows, response_values, test_ratio=0.2, seed=2026,
@@ -791,6 +816,10 @@ def train_surrogate(x_rows, response_values, test_ratio=0.2, seed=2026,
     if not HAS_NUMPY:
         return {"error": "当前环境未安装 numpy，无法训练代理模型。"}
     model_params = model_params or {}
+    # 设置对话框产生扁平参数；同时兼容早期脚本使用的按模型分组格式。
+    model_key = {"Kriging": "kriging", "SVR": "svr"}.get(model, "ann")
+    params = dict(model_params.get(model_key, model_params))
+    params.pop("net_mode", None)  # 对话框选项，不是训练器参数。
     X = _np.array(x_rows, float)
     y = _np.array(response_values, float)
     if len(y) < 6:
@@ -804,11 +833,11 @@ def train_surrogate(x_rows, response_values, test_ratio=0.2, seed=2026,
     t0 = time.time()
     try:
         if model == "Kriging":
-            result = train_kriging(Xtr, ytr, Xte, **model_params.get("kriging", {}))
+            result = train_kriging(Xtr, ytr, Xte, **params)
         elif model == "SVR":
-            result = train_svr(Xtr, ytr, Xte, **model_params.get("svr", {}))
+            result = train_svr(Xtr, ytr, Xte, **params)
         else:
-            result = train_ann(Xtr, ytr, Xte, **model_params.get("ann", {}))
+            result = train_ann(Xtr, ytr, Xte, **params)
     except Exception as exc:  # noqa: BLE001
         return {"error": f"训练失败：{exc}"}
     elapsed = time.time() - t0
@@ -819,6 +848,7 @@ def train_surrogate(x_rows, response_values, test_ratio=0.2, seed=2026,
     r2_test = float(1 - _np.sum((yte - pred) ** 2) / ss_tot)
     return {
         "params": result["params"],
+        "predict_fn": result.get("predict_fn"),
         "train_samples": int(len(train_idx)),
         "test_samples": int(len(test_idx)),
         "train_time_s": round(elapsed, 4),

@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import math
 import statistics
+import json
+import logging
+from dataclasses import asdict
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -94,6 +97,8 @@ class OptimizationPage(QWidget):
 
     def _update_method_actions(self):
         """按方案类型切换主动作，避免把筛选/田口误导成鲁棒优化。"""
+        if hasattr(self, "uncertainty_label"):
+            self._update_uncertainty_label()
         method = self._method()
         is_screening = "筛选" in method
         is_taguchi = "田口" in method
@@ -166,17 +171,24 @@ class OptimizationPage(QWidget):
         self.weight_spin.setSingleStep(0.05); self.weight_spin.setValue(0.5)
         controls2.addWidget(self.weight_spin)
         controls2.addSpacing(16)
-        controls2.addWidget(QLabel("约束边界退让 k："))
+        controls2.addWidget(QLabel("约束安全系数 k："))
         self.k_constraint_spin = QDoubleSpinBox(); self.k_constraint_spin.setRange(1.0, 10.0)
         self.k_constraint_spin.setSingleStep(0.5); self.k_constraint_spin.setValue(6.0)
+        self.k_constraint_spin.setToolTip("在所有优化模式中执行已勾选约束。例如望小约束：均值 + k×标准差 ≤ 上限。")
         controls2.addWidget(self.k_constraint_spin)
         controls2.addSpacing(8)
-        controls2.addWidget(QLabel("输入边界退让 k："))
+        controls2.addWidget(QLabel("输入不确定性系数 k："))
         self.k_design_spin = QDoubleSpinBox(); self.k_design_spin.setRange(1.0, 10.0)
         self.k_design_spin.setSingleStep(0.5); self.k_design_spin.setValue(6.0)
+        self.k_design_spin.setToolTip("设计区间因子：标准差=(上限−下限)/(2k)。k 越大，扰动越小；此参数不收缩搜索边界。概率因子采用已填写的方差。")
         controls2.addWidget(self.k_design_spin)
         controls2.addStretch()
         layout.addLayout(controls2)
+        self.uncertainty_label = QLabel()
+        self.uncertainty_label.setWordWrap(True)
+        layout.addWidget(self.uncertainty_label)
+        self.k_design_spin.valueChanged.connect(self._update_uncertainty_label)
+        self._update_uncertainty_label()
 
         self.robust_mode_combo.currentTextChanged.connect(self._on_robust_mode)
         self._on_robust_mode(self.robust_mode_combo.currentText())
@@ -190,7 +202,12 @@ class OptimizationPage(QWidget):
 
     def _on_robust_mode(self, text):
         self.weight_spin.setEnabled("加权" in text)
-        self.k_constraint_spin.setEnabled("约束" in text or True)
+        self.k_constraint_spin.setEnabled(True)
+
+    def _update_uncertainty_label(self, *_args):
+        sigmas = [f"{f.name}: σ={oe._sigma_of_factor(f, self.k_design_spin.value()):.6g}"
+                  for f in self.project_data.factors if f.name]
+        self.uncertainty_label.setText("当前输入标准差（区间设计因子 σ=区间宽度/(2k)）：" + "；".join(sigmas))
 
     def _new_text(self):
         text = QTextEdit()
@@ -662,6 +679,14 @@ class OptimizationPage(QWidget):
         self.project_data.taguchi_result = result
 
     # ------------------------------------------------------------- 代理模型
+    def _surrogate_signature(self):
+        return json.dumps({
+            "config": self.project_data.surrogate_config,
+            "factors": [asdict(f) for f in self._factors_for_doe()],
+            "responses": [asdict(r) for r in self._responses()],
+            "matrix": self._matrix(),
+        }, sort_keys=True, ensure_ascii=False)
+
     def _run_surrogate(self):
         cfg = self.project_data.surrogate_config or {}
         if not cfg:
@@ -687,7 +712,7 @@ class OptimizationPage(QWidget):
                     x = [(float(row[n]) - lo[n]) / max(hi[n] - lo[n], 1e-12) for n in names]
                     X_rows.append(x)
                     y.append(yv)
-                except (TypeError, ValueError):
+                except (KeyError, TypeError, ValueError):
                     continue
             if len(y) < 6:
                 per_resp[resp.name] = {
@@ -696,11 +721,81 @@ class OptimizationPage(QWidget):
             per_resp[resp.name] = engine.train_surrogate(
                 X_rows, y, model=cfg.get("model"),
                 model_params=cfg.get("model_params") or {})
-        self.project_data.surrogate_result = {"responses": per_resp}
+        self.project_data.surrogate_result = {
+            "responses": per_resp, "signature": self._surrogate_signature()}
+
+    def _build_surrogate_context(self):
+        """把已训练的代理预测器接入鲁棒优化上下文。"""
+        cfg = self.project_data.surrogate_config or {}
+        results = self.project_data.surrogate_result.get("responses", {})
+        factors = self._factors_for_doe()
+        names = [f.name for f in factors]
+        bounds = cfg.get("bounds") or {}
+        lo = {name: (bounds.get(name) or engine.factor_limits(f))[0]
+              for name, f in zip(names, factors)}
+        hi = {name: (bounds.get(name) or engine.factor_limits(f))[1]
+              for name, f in zip(names, factors)}
+        models = {}
+        errors = []
+        for resp in self._responses():
+            result = results.get(resp.name) or {}
+            predictor = result.get("predict_fn")
+            if not callable(predictor):
+                errors.append(f"响应 {resp.name}：{result.get('error', '没有可用的代理预测器')}")
+                continue
+            raw_values = []
+            for row in self._matrix():
+                try:
+                    raw_values.append(float(row[resp.name]))
+                except (KeyError, TypeError, ValueError):
+                    pass
+
+            def predict_raw(values, predictor=predictor):
+                normalized = [
+                    (float(value) - lo[name]) / max(hi[name] - lo[name], 1e-12)
+                    for name, value in zip(names, values)
+                ]
+                return predictor(normalized)
+
+            models[resp.name] = {
+                "model_type": cfg.get("model", "Kriging"),
+                "validation": result,
+                "predict_fn": predict_raw,
+                "predicted": raw_values or [0.0, 1.0],
+                "rmse": math.sqrt(statistics.mean(
+                    (a - p) ** 2 for a, p in zip(result["actual"], result["predicted"]))),
+                "residual_std": 0.0,
+                "finite_difference_step": 1e-3,
+            }
+        if errors or not models:
+            return None, errors or ["代理模型尚未训练成功，请先检查响应数据和模型设置。"]
+        return {
+            "inputs": factors, "names": names, "models": models,
+            "errors": [], "_responses": self.project_data.responses,
+            "_project": self.project_data,
+        }, []
 
     # ============================================================ 工作台
     def run_workbench(self):
-        context, errors = oe.build_models(self.project_data)
+        self.run_all_btn.setEnabled(False)
+        try:
+            self._execute_workbench()
+        except Exception as exc:
+            logging.exception("稳定性设计与鲁棒优化失败")
+            self.status_label.setText(f"分析失败：{exc}")
+            QMessageBox.warning(self, "分析失败", f"稳定性分析未完成：{exc}")
+        finally:
+            self.run_all_btn.setEnabled(True)
+
+    def _execute_workbench(self):
+        self._update_uncertainty_label()
+        if "代理模型" in self._method():
+            saved = self.project_data.surrogate_result or {}
+            if saved.get("signature") != self._surrogate_signature():
+                self._run_surrogate()
+            context, errors = self._build_surrogate_context()
+        else:
+            context, errors = oe.build_models(self.project_data)
         self._oe_context = context
         if not context or not context["models"]:
             QMessageBox.warning(self, "无法分析",
@@ -765,7 +860,7 @@ class OptimizationPage(QWidget):
         if scatter:
             xs = [p[0] for p in scatter]
             ys = [p[1] for p in scatter]
-            ax.scatter(xs, ys, s=18, alpha=0.6, color="#17a2b8", label="进化解")
+            ax.scatter(xs, ys, s=18, alpha=0.6, color="#17a2b8", label="可行进化解")
             # 前沿曲线
             front = robust.get("front") or []
             if front:

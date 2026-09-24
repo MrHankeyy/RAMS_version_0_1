@@ -151,6 +151,15 @@ def model_grad_x(model, x_raw):
     """梯度 wrt 原始单位 x。"""
     if "grad_fn" in model:
         return _np.asarray(model["grad_fn"](_np.asarray(x_raw, float)), float)
+    if "predict_fn" in model:
+        x = _np.asarray(x_raw, float)
+        step = float(model.get("finite_difference_step", 1e-4))
+        grad = _np.zeros(len(x))
+        for i in range(len(x)):
+            delta = _np.zeros(len(x)); delta[i] = step
+            grad[i] = (model["predict_fn"](x + delta)
+                       - model["predict_fn"](x - delta)) / (2.0 * step)
+        return grad
     z = (_np.asarray(x_raw, float) - model["center"]) / model["half"]
     gz = _quad_grad(model["terms"], model["coef"], z)
     return gz / model["half"]
@@ -159,6 +168,16 @@ def model_grad_x(model, x_raw):
 def model_hess_diag_x(model, x_raw):
     if "hess_diag_fn" in model:
         return _np.asarray(model["hess_diag_fn"](_np.asarray(x_raw, float)), float)
+    if "predict_fn" in model:
+        x = _np.asarray(x_raw, float)
+        step = float(model.get("finite_difference_step", 1e-4))
+        center = model["predict_fn"](x)
+        hess = _np.zeros(len(x))
+        for i in range(len(x)):
+            delta = _np.zeros(len(x)); delta[i] = step
+            hess[i] = (model["predict_fn"](x + delta)
+                       - 2.0 * center + model["predict_fn"](x - delta)) / step ** 2
+        return hess
     z = (_np.asarray(x_raw, float) - model["center"]) / model["half"]
     hz = _quad_hess_diag(model["terms"], z)
     # 对 z 的二阶导转换：∂²f/∂x² = (1/h²)·∂²f/∂z²
@@ -338,7 +357,12 @@ def _constraint_limits(resp):
 
 
 def _response_scale(model):
-    return model["rmse"] if model["rmse"] > 0 else 1.0
+    """按响应数据幅度归一化，不让拟合精度改变优化目标的权重。"""
+    values = [float(v) for v in model.get("predicted", []) if _isfinite(v)]
+    if not values:
+        return 1.0
+    span = max(values) - min(values)
+    return span if span > 1e-12 else max(max(abs(v) for v in values), 1.0)
 
 
 def evaluate_design(context, x_design, k_design, weight_r, use_constraints=False,
@@ -361,9 +385,12 @@ def evaluate_design(context, x_design, k_design, weight_r, use_constraints=False
         scale = _response_scale(m)
         std_n = sigma / max(scale, 1e-12)
         # 是否约束
-        is_cons = use_constraints and self_is_constraint(resp)
+        is_cons = self_is_constraint(resp)
         if is_cons:
             kind, lim = _constraint_limits(resp)
+            if use_constraints and (lim is None or
+                                    (kind == "both" and None in lim)):
+                raise ValueError(f"约束响应 {resp.name} 未设置有效的约束界限。")
             if kind == "upper" and lim is not None:
                 infeas_in = max(0.0, mu + k_constraint * sigma - lim)
             elif kind == "lower" and lim is not None:
@@ -378,10 +405,11 @@ def evaluate_design(context, x_design, k_design, weight_r, use_constraints=False
             else:
                 infeas_in = 0.0
             limit_scale = abs(lim if isinstance(lim, (int, float))
-                              else (lim[1] if lim else 0.0))
-            infeas += infeas_in / max(limit_scale, 1.0)
+                              else ((lim[1] or 0.0) if lim else 0.0))
+            if use_constraints:
+                infeas += infeas_in / max(limit_scale, 1.0)
             resp_cons.append({"name": resp.name, "mu": mu, "sigma": sigma, "d": d})
-        else:
+        if not is_cons or "目标" in resp.kind:
             resp_objs.append({"name": resp.name, "mu": mu, "sigma": sigma, "d": d})
             perf_sum += d
             std_sum += std_n
@@ -568,7 +596,9 @@ def _knee_point(front):
     best, score = None, float("inf")
     for item, o1, o2 in zip(front, f1, f2):
         s = (o1 - m1) / span1 + (o2 - m2) / span2
-        if s < score:
+        # 两个极端点的归一化和均为 1；平分时优先稳定性，不能由前沿排序决定。
+        if s < score - 1e-12 or (abs(s - score) <= 1e-12 and
+                                (best is None or o2 < best[1][1])):
             score, best = s, item
     return best
 
@@ -582,7 +612,8 @@ def robust_optimize(context, mode="multi", pop=60, gen=100, weight=0.5,
     dnames = [f.name for f in dinputs]
     lo = [de.factor_limits(f)[0] for f in dinputs]
     hi = [de.factor_limits(f)[1] for f in dinputs]
-    use_cons = mode in ("constraint", "weighted_constraint")
+    # 响应角色来自业务建模，不能因选择 NSGA-II / 加权模式而把约束变成目标。
+    use_cons = any(self_is_constraint(resp) for resp in project_responses(context))
 
     def evaluate(vec):
         xd = dict(zip(dnames, vec))
@@ -600,35 +631,49 @@ def robust_optimize(context, mode="multi", pop=60, gen=100, weight=0.5,
         vec = list(vec_tuple)
         obj, info = evaluate(vec)
         pairs.append((vec, obj, info))
-    front_full = _pareto(pairs)
+    feasible = [t for t in pairs if t[2]["r"]["infeas"] <= 1e-8]
+    # 最终推荐与前沿优先使用可行解，不能让低目标值抵消约束违反。
+    candidates = feasible or pairs
+    front_full = _pareto(feasible)
 
     # 选择推荐最优解
     if mode == "weighted":
-        best = min(pairs, key=lambda t: t[1][0])
+        best = min(candidates, key=lambda t: t[1][0])
     elif mode == "constraint":
-        feasible = [t for t in pairs if t[2]["r"]["infeas"] <= 1e-6]
-        best = (min(feasible, key=lambda t: sum(t[1]))
-                if feasible else min(pairs, key=lambda t: sum(t[1])))
+        best = min(candidates, key=lambda t: sum(t[1]))
     else:
-        best = _knee_point(front_full) or min(pairs, key=lambda t: sum(t[1]))
+        best = _knee_point(front_full) or min(candidates, key=lambda t: sum(t[1]))
+    if not feasible:
+        best = min(pairs, key=lambda t: (t[2]["r"]["infeas"], sum(t[1])))
 
     knee = None if mode == "weighted" else _knee_point(front_full)
     recommended = best
     x_rec = recommended[2]["x"]
     r_rec = recommended[2]["r"]
     resp_detail = []
+    objective_names = {item["name"] for item in r_rec["objectives"]}
+    constraint_names = {item["name"] for item in r_rec["constraints"]}
+    seen_responses = set()
     for item in r_rec["objectives"] + r_rec["constraints"]:
+        if item["name"] in seen_responses:
+            continue
+        seen_responses.add(item["name"])
+        role = ("目标+约束" if item["name"] in objective_names and item["name"] in constraint_names
+                else "约束" if item["name"] in constraint_names else "目标")
         resp_detail.append({"name": item["name"], "mu": item["mu"],
-                            "sigma": item["sigma"], "d": round(item["d"], 4)})
+                            "sigma": item["sigma"], "d": round(item["d"], 4), "role": role})
 
     result = {
         "mode": mode, "weight": weight, "k_design": k_design,
         "k_constraint": k_constraint, "design_names": dnames,
+        "input_sigmas": {f.name: _sigma_of_factor(f, k_design) for f in context["inputs"]},
+        "objective_names": sorted(objective_names), "constraint_names": sorted(constraint_names),
+        "feasible_count": len(feasible),
         "front": [{"x": _info["x"], "obj": [round(float(o), 6) for o in _obj],
                    "infeas": _info["r"]["infeas"]}
                   for _vec, _obj, _info in front_full],
         "front_scatter": [[float(t[1][0]), float(t[1][1] if len(t[1]) > 1 else 0.0)]
-                          for t in pairs if len(t[1]) > 1],
+                          for t in feasible if len(t[1]) > 1],
         "knee": ({"x": knee[2]["x"], "obj": [round(float(o), 6) for o in knee[1]],
                   "infeas": knee[2]["r"]["infeas"]} if knee else None),
         "best": {"x": x_rec, "obj": [round(float(o), 6) for o in recommended[1]],
@@ -647,11 +692,17 @@ def _robust_result_text(res):
                   "weighted": "加权单目标（权重可设）",
                   "constraint": "约束型（稳定性转为独立约束）"}
     lines = [f"【{mode_names.get(res['mode'], res['mode'])}】",
-             f"六西格玛设计系数：约束边界退让 k={res['k_constraint']}，"
-             f"输入边界退让 k={res['k_design']}"]
+             f"约束安全系数 k={res['k_constraint']}，输入不确定性系数 k={res['k_design']}",
+             "输入标准差：" + "，".join(f"{n}={s:.6g}" for n, s in res.get("input_sigmas", {}).items()),
+             "目标响应：" + "、".join(res.get("objective_names", [])),
+             "约束响应：" + ("、".join(res.get("constraint_names", [])) or "无"),
+             "稳定性按响应数据极差归一化；均值和方差采用局部二阶近似。"]
+    if res["k_design"] < 3:
+        lines.append("提示：区间因子的输入扰动较大，局部二阶近似可能失真，建议用扰动抽样复核。")
     if res["mode"] == "weighted":
         lines.append(f"权重 λ(目标均值) = {res['weight']}，稳定性权重 = {round(1 - res['weight'], 2)}")
     lines.append(f"评估解数量：{res['evaluated_count']}")
+    lines.append(f"可行解数量：{res.get('feasible_count', 0)}；图中只显示可行解，不把约束罚项作为响应波动。")
     lines.append("")
     if res["mode"] != "weighted" and res["front"]:
         lines.append(f"帕累托前沿解数量：{len(res['front'])}")
@@ -660,13 +711,14 @@ def _robust_result_text(res):
             lines.append(f"Knee Point：{knee['x']} ｜ 目标值 {knee['obj']}")
     best = res["best"]
     lines.append("")
-    lines.append("★ 推荐优化设计（稳健设计点）")
+    lines.append("★ 推荐优化设计（稳健设计点）" if res.get("feasible_count", 0)
+                 else "尚未找到满足约束的设计；以下仅列出违例最小的候选点。")
     lines.append(f"  因子设置：{ {k: round(v, 5) for k, v in best['x'].items()} }")
     lines.append(f"  综合望性均值 {best['mean_perf']} ｜ 归一化稳定性 {best['std_norm']} ｜ "
                  f"约束违例 {best['infeas']}")
-    lines.append("  各响应（点 μ，σ，望性 d）：")
+    lines.append("  各响应（扰动后近似均值 μ、标准差 σ、望性 d）：")
     for item in best["responses"]:
-        lines.append(f"    {item['name']}: μ={item['mu']:.4g}, σ={item['sigma']:.4g}, d={item['d']}")
+        lines.append(f"    {item['name']}（{item.get('role', '目标')}）: μ={item['mu']:.4g}, σ={item['sigma']:.4g}, d={item['d']}")
     return "\n".join(lines)
 
 
@@ -819,6 +871,9 @@ def anova_and_lof(context, project):
     names = context["names"]
     lines = ["【回归方差分析 / 显著性 / 失拟(LOF)】"]
     for resp_name, m in context["models"].items():
+        if "predict_fn" in m:
+            lines.append(f"◆ 响应 {resp_name}：代理模型不适用多项式回归 ANOVA/LOF；请查看留出集验证与残差。")
+            continue
         n = m["n"]
         # 从残差计算
         y = [float(row[resp_name]) for row in matrix if row.get(resp_name) not in (None, "") and all(_isfinite(row[c]) for c in names)]
@@ -876,6 +931,12 @@ def cross_validation(context):
         return "无模型可交叉验证。"
     lines = ["【交互验证（交叉验证）】"]
     for resp_name, m in context["models"].items():
+        if "predict_fn" in m:
+            validation = m.get("validation", {})
+            lines.append(f"  响应 {resp_name}（{m.get('model_type', '代理模型')}）："
+                         f"留出集验证，测试样本 {validation.get('test_samples', '未知')}，"
+                         f"R²={validation.get('r2_test', '未知')}，RMSE={m['rmse']:.4g}；未执行 K 折验证。")
+            continue
         X, y = _matrix_xy(context, resp_name)
         if len(y) < 4:
             lines.append(f"  {resp_name}: 样本不足")
@@ -913,7 +974,7 @@ def _matrix_xy(context, resp_name):
         try:
             xv = [float(row[c]) for c in names]
             yv = float(row[resp_name])
-        except (TypeError, ValueError):
+        except (KeyError, TypeError, ValueError):
             continue
         X.append(xv)
         y.append(yv)
@@ -926,6 +987,13 @@ def residual_analysis(context):
     lines = ["【拟合度与残差分析】"]
     data = {}
     for resp_name, m in context["models"].items():
+        if "predict_fn" in m:
+            validation = m.get("validation", {})
+            predicted = validation.get("predicted", [])
+            residuals = [a - p for a, p in zip(validation.get("actual", []), predicted)]
+            lines.append(f"  {resp_name}：留出集残差，R²={validation.get('r2_test', '未知')}，RMSE={m['rmse']:.4g}")
+            data[resp_name] = {"predicted": predicted, "residual": residuals}
+            continue
         residuals = m["residual"]
         n = len(residuals)
         mean_r = statistics.mean(residuals) if n else 0.0
@@ -1031,6 +1099,11 @@ def model_extraction(context):
         return "无模型可提取。"
     lines = ["【模型提取（拟合方程）】"]
     for resp_name, m in context["models"].items():
+        if "predict_fn" in m:
+            lines.append(f"  {resp_name}：{m.get('model_type', '代理模型')} 已训练预测器；"
+                         f"输入变量：{context['names']}。鲁棒优化直接调用该预测器，"
+                         "采用数值梯度和 Hessian 传播输入不确定性，无二次多项式方程。")
+            continue
         inputs = context["inputs"]
         names = context["names"]
         # 用实际的因子名替换 x_i 命名

@@ -13,6 +13,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+from PyQt6.QtWidgets import QApplication
 
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
@@ -23,34 +24,45 @@ if str(ROOT) not in sys.path:
 import doe_engine as doe
 import optimizer_engine as optimizer
 from models import FactorItem, ProjectData, ResponseItem
+from pages.optimization_page import OptimizationPage
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+APP = QApplication.instance() or QApplication([])
 
 
-def explicit_objective(x1, x2):
-    """用于建模精度测试的显式二次目标函数。"""
+def quadratic_objective(x1, x2):
+    """用于响应面精度测试的显式二次函数。"""
     return 4.0 + (x1 - 2.0) ** 2 + 1.5 * (x2 - 1.5) ** 2 + 0.4 * x1 * x2
 
 
-def explicit_constraint(x1, x2):
-    """约束 g(x)<=0；最优可行点应满足 x1+x2<=3.5。"""
-    return x1 + x2 - 3.5
+def f_obj(x1, x2):
+    """与 test.py 一致的鲁棒优化校准目标。"""
+    background = 20.0 + 0.03 * ((x1 - 2.0) ** 2 + (x2 - 2.0) ** 2)
+    narrow = -8.0 * math.exp(
+        -0.5 * ((x1 - 3.9) ** 2 + (x2 - 3.9) ** 2) / 0.18 ** 2
+    )
+    broad = -11.5 * math.exp(
+        -0.5 * ((x1 - 2.0) ** 2 + (x2 - 2.0) ** 2) / 2.0 ** 2
+    )
+    return background + narrow + broad
+
+
+def g_constr(x1, x2):
+    """与 test.py 一致的约束，满足 g(x)<=0。"""
+    return x1 + x2 - 8.0
 
 
 def bimodal_objective(x):
-    """双盆地目标：A 深而窄，B 浅而宽。目标是最小化。"""
-    x1, x2 = x
-    background = 20.0 + 0.1 * ((x1 - 5.0) ** 2 + (x2 - 5.0) ** 2)
-    narrow = -12.0 * math.exp(-0.5 * ((x1 - 1.5) ** 2 + (x2 - 1.5) ** 2) / 0.35 ** 2)
-    broad = -5.0 * math.exp(-0.5 * ((x1 - 3.6) ** 2 + (x2 - 3.6) ** 2) / 1.8 ** 2)
-    return background + narrow + broad
+    return f_obj(float(x[0]), float(x[1]))
 
 
 def bimodal_gradient(x):
     x1, x2 = x
     points = np.array([x1, x2], dtype=float)
-    gradient = 0.2 * (points - 5.0)
+    gradient = 0.06 * (points - 2.0)
     for center, amplitude, width in (
-        (np.array([1.5, 1.5]), 12.0, 0.35),
-        (np.array([3.6, 3.6]), 5.0, 1.8),
+        (np.array([3.9, 3.9]), 8.0, 0.18),
+        (np.array([2.0, 2.0]), 11.5, 2.0),
     ):
         delta = points - center
         gaussian = math.exp(-0.5 * float(delta @ delta) / width ** 2)
@@ -61,10 +73,10 @@ def bimodal_gradient(x):
 def bimodal_hessian_diag(x):
     x1, x2 = x
     points = np.array([x1, x2], dtype=float)
-    hessian = np.full(2, 0.2)
+    hessian = np.full(2, 0.06)
     for center, amplitude, width in (
-        (np.array([1.5, 1.5]), 12.0, 0.35),
-        (np.array([3.6, 3.6]), 5.0, 1.8),
+        (np.array([3.9, 3.9]), 8.0, 0.18),
+        (np.array([2.0, 2.0]), 11.5, 2.0),
     ):
         delta = points - center
         gaussian = math.exp(-0.5 * float(delta @ delta) / width ** 2)
@@ -101,7 +113,7 @@ def test_response_surface():
     assert len(rows) == 11
 
     x = np.array([[row["X1"], row["X2"]] for row in rows], dtype=float)
-    y = np.array([explicit_objective(*point) for point in x])
+    y = np.array([quadratic_objective(*point) for point in x])
     center = np.array([2.0, 2.0])
     span = np.array([2.0, 2.0])
     fit = doe.fit_response_surface((x - center) / span, y)
@@ -119,7 +131,7 @@ def test_surrogate_models():
     factors = [("X1", 0.0, 4.0, None), ("X2", 0.0, 4.0, None)]
     rows = doe.build_samples(factors, 48, "最优 LHS", seed=19)
     x = [[row["X1"] / 4.0, row["X2"] / 4.0] for row in rows]
-    y = [explicit_objective(row["X1"], row["X2"]) for row in rows]
+    y = [quadratic_objective(row["X1"], row["X2"]) for row in rows]
 
     configs = {
         "Kriging": {"kriging": {"correlation": "Gaussian", "trend": "一次趋势"}},
@@ -139,7 +151,9 @@ def test_surrogate_models():
     }
     results = {}
     for model, params in configs.items():
-        result = doe.train_surrogate(x, y, model=model, model_params=params)
+        result = doe.train_surrogate(
+            x, y, model=model, model_params=params, seed=2027
+        )
         assert "error" not in result, (model, result)
         assert len(result["predicted"]) == result["test_samples"]
         assert math.isfinite(result["r2_test"])
@@ -147,6 +161,33 @@ def test_surrogate_models():
     assert results["Kriging"]["trend"] == "一次趋势"
     assert results["SVR"]["poly_degree"] == 2
     return results
+
+
+def test_surrogates_on_robust_function():
+    """直接用本次鲁棒校准函数验证三种代理的预测能力。"""
+    factors = [("X1", 0.0, 4.0, None), ("X2", 0.0, 4.0, None)]
+    rows = doe.build_samples(factors, 160, "最优 LHS", seed=19)
+    x = [[row["X1"] / 4.0, row["X2"] / 4.0] for row in rows]
+    y = [f_obj(row["X1"], row["X2"]) for row in rows]
+    configs = {
+        "Kriging": {"kriging": {"correlation": "Gaussian", "trend": "一次趋势"}},
+        "SVR": {"svr": {"kernel": "RBF 核", "c_min": 1.0, "c_max": 10.0,
+                          "c_step": 3.0, "g_min": 0.01, "g_max": 2.0, "g_step": 0.5}},
+        "ANN": {"ann": {"hidden_layers": 2, "hidden_nodes": 16,
+                          "activation": "tanh", "learning_rate": 0.01,
+                          "epochs": 300}},
+    }
+    metrics = {}
+    for model, params in configs.items():
+        result = doe.train_surrogate(
+            x, y, model=model, model_params=params, seed=2027
+        )
+        assert "error" not in result, (model, result)
+        assert result["r2_test"] > 0.60, (model, result)
+        assert result["mape_test_%"] < 5.0, (model, result)
+        metrics[model] = {"r2_test": result["r2_test"],
+                          "mape_test_%": result["mape_test_%"]}
+    return metrics
 
 
 def test_robust_optimization():
@@ -166,8 +207,8 @@ def test_robust_optimization():
     for index, row in enumerate(rows):
         project.doe_matrix.append({
             "Run_ID": index + 1, "X1": row["X1"], "X2": row["X2"],
-            "Y": explicit_objective(row["X1"], row["X2"]),
-            "G": explicit_constraint(row["X1"], row["X2"]),
+            "Y": quadratic_objective(row["X1"], row["X2"]),
+            "G": row["X1"] + row["X2"] - 3.5,
         })
 
     context, errors = optimizer.build_models(project)
@@ -186,33 +227,35 @@ def test_robust_optimization():
         assert math.isfinite(result["best"]["mean_perf"])
         assert math.isfinite(result["best"]["std_norm"])
         if mode == "multi":
-            assert len(result["front"]) >= 2, result
+            # 目标最优与最稳定点可以重合，前沿只有一个点也是有效结果。
+            assert result["front"], result["best"]
         if mode == "weighted":
             assert len(result["best"]["obj"]) == 1, result
-        if mode == "constraint":
-            assert result["best"]["infeas"] <= 1e-6, result
+        assert result["best"]["infeas"] <= 1e-6, (mode, result["best"])
+        assert result["objective_names"] == ["Y"]
+        assert result["constraint_names"] == ["G"]
         results[mode] = result["best"]
     return results
 
 
 def test_bimodal_robust_front():
-    """用解析导数严格验证：窄深名义最优点与宽浅鲁棒点应同时出现。"""
+    """用与目标函数一致的解析导数验证宽谷附近的鲁棒解及约束。"""
     factors = make_factors()
     project = ProjectData(
         factors=factors,
         responses=[
             ResponseItem(name="Y", kind="目标", feature="望小", robust_limit="20"),
-            ResponseItem(name="G", kind="约束", feature="望小", robust_limit="8"),
+            ResponseItem(name="G", kind="约束", feature="望小", robust_limit="0"),
         ],
     )
     model_y = make_analytic_model(
-        bimodal_objective, bimodal_gradient, bimodal_hessian_diag, (0.0, 5.0)
+        bimodal_objective, bimodal_gradient, bimodal_hessian_diag, (0.0, 4.0)
     )
     model_g = make_analytic_model(
         lambda x: float(x[0] + x[1] - 8.0),
         lambda _x: np.array([1.0, 1.0]),
         lambda _x: np.array([0.0, 0.0]),
-        (0.0, 5.0),
+        (0.0, 4.0),
     )
     context = {
         "inputs": factors, "names": ["X1", "X2"],
@@ -220,8 +263,8 @@ def test_bimodal_robust_front():
         "_responses": project.responses, "_project": project,
     }
 
-    narrow = np.array([1.5, 1.5])
-    broad = np.array([3.6, 3.6])
+    narrow = np.array([3.9, 3.9])
+    broad = np.array([2.0, 2.0])
     narrow_moments = optimizer.robust_moments(
         model_y, {"X1": narrow[0], "X2": narrow[1]}, context,
         k_design=6.0, include_residual=False
@@ -239,11 +282,13 @@ def test_bimodal_robust_front():
         context, mode="multi", pop=80, gen=140, k_design=6.0,
         k_constraint=1.0, seed=23,
     )
-    assert len(multi["front"]) >= 2, multi
+    assert multi["front"], multi["best"]
     front_points = [np.array([item["x"]["X1"], item["x"]["X2"]])
                     for item in multi["front"]]
-    assert any(np.linalg.norm(point - narrow) < 0.65 for point in front_points), multi
     assert any(np.linalg.norm(point - broad) < 1.0 for point in front_points), multi
+    # 窄深点在 6σ 输入扰动下均值和波动同时恶化，因此被严格鲁棒 Pareto 前沿支配，
+    # 不能把名义最优误报为鲁棒候选。
+    assert all(np.linalg.norm(point - narrow) > 1.0 for point in front_points), multi
 
     stable = optimizer.robust_optimize(
         context, mode="weighted", pop=80, gen=140, weight=0.2,
@@ -267,12 +312,67 @@ def test_bimodal_robust_front():
     }
 
 
+def test_surrogate_drives_optimization():
+    """验证 Kriging、SVR、ANN 训练出的预测器确实进入优化。"""
+    factors = make_factors()
+    rows = doe.build_samples(
+        [("X1", 0.0, 4.0, None), ("X2", 0.0, 4.0, None)],
+        160, "最优 LHS", seed=19,
+    )
+    matrix = [
+            {"Run_ID": i + 1, "X1": row["X1"], "X2": row["X2"],
+             "Y": f_obj(row["X1"], row["X2"])}
+            for i, row in enumerate(rows)
+        ]
+    configs = {
+        "Kriging": {"kriging": {"correlation": "Gaussian", "trend": "一次趋势"}},
+        "SVR": {"svr": {"kernel": "RBF 核", "c_min": 1.0, "c_max": 10.0,
+                          "c_step": 3.0, "g_min": 0.01, "g_max": 2.0, "g_step": 0.5}},
+        "ANN": {"ann": {"hidden_layers": 2, "hidden_nodes": 16,
+                          "activation": "tanh", "learning_rate": 0.01,
+                          "epochs": 300}},
+    }
+    results = {}
+    for model, model_params in configs.items():
+        project = ProjectData(
+            factors=factors,
+            responses=[ResponseItem(name="Y", kind="目标", feature="望小", robust_limit="20")],
+            design_method=f"代理模型建模 · {model}",
+            surrogate_config={
+                "model": model, "sample_count": 160, "doe_method": "最优 LHS",
+                "bounds": {"X1": [0.0, 4.0], "X2": [0.0, 4.0]},
+                "model_params": model_params,
+            },
+            doe_matrix=matrix,
+        )
+        page = OptimizationPage(project)
+        page._run_surrogate()
+        context, errors = page._build_surrogate_context()
+        assert context and not errors
+        assert callable(context["models"]["Y"]["predict_fn"])
+        model_results = {}
+        for mode, weight in (("multi", 0.5), ("weighted", 0.2)):
+            result = optimizer.robust_optimize(
+                context, mode=mode, pop=60, gen=100, weight=weight,
+                k_design=6.0, k_constraint=6.0, seed=23,
+            )
+            point = result["best"]["x"]
+            assert point["X1"] < 3.2 and point["X2"] < 3.2, (model, mode, result["best"])
+            if model == "Kriging":
+                assert max(abs(point[n] - 2.0) for n in ("X1", "X2")) < 0.3, (mode, point)
+            model_results[mode] = point
+        results[model] = model_results
+    return results
+
+
 def main():
     results = {
         "RSM": test_response_surface(),
         "surrogates": test_surrogate_models(),
+        "surrogates_on_robust_function": test_surrogates_on_robust_function(),
         "optimization": test_robust_optimization(),
         "bimodal_robust_front": test_bimodal_robust_front(),
+        "surrogate_driven_optimization": test_surrogate_drives_optimization(),
     }
     print("explicit regression passed")
     print(results)
