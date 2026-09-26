@@ -78,6 +78,7 @@ class ConfigurationPage(QWidget):
         design_layout.addWidget(self.dynamic_params_widget)
 
         self.preview_label = QLabel("尚未估算试验次数")
+        self.preview_label.setWordWrap(True)
         self.preview_label.setStyleSheet("color:#1d4ed8;font-weight:bold;")
         design_layout.addWidget(self.preview_label)
 
@@ -106,6 +107,7 @@ class ConfigurationPage(QWidget):
 
         self.setLayout(main_layout)
         self._connect_preview_signals()
+        self._on_taguchi_levels(self.t_levels_combo.currentText())
         self.method_combo.currentTextChanged.connect(self._on_method_changed)
         self.dynamic_params_widget.currentChanged.connect(
             lambda _index: self._fit_dynamic_params())
@@ -270,6 +272,21 @@ class ConfigurationPage(QWidget):
         row1.addStretch()
         layout.addLayout(row1)
 
+        options = QHBoxLayout()
+        options.addWidget(QLabel("噪声因子水平数："))
+        self.t_noise_levels_combo = QComboBox()
+        self.t_noise_levels_combo.addItems(["2 水平", "3 水平"])
+        options.addWidget(self.t_noise_levels_combo)
+        options.addWidget(QLabel("整表重复次数："))
+        self.t_repeat_spin = QSpinBox()
+        self.t_repeat_spin.setRange(1, 10)
+        options.addWidget(self.t_repeat_spin)
+        options.addWidget(QLabel("试验顺序："))
+        self.t_order_combo = QComboBox()
+        self.t_order_combo.addItems(["随机", "保持相同"])
+        options.addWidget(self.t_order_combo)
+        layout.addLayout(options)
+
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("信噪比目标："))
         self.t_snr_combo = QComboBox()
@@ -292,6 +309,7 @@ class ConfigurationPage(QWidget):
         layout.addWidget(self.t_hint)
 
         self.t_levels_combo.currentTextChanged.connect(self._on_taguchi_levels)
+        self.t_noise_levels_combo.currentTextChanged.connect(self._on_taguchi_levels)
         return widget
 
     def _build_surrogate_widget(self):
@@ -328,6 +346,8 @@ class ConfigurationPage(QWidget):
         for spin in (self.f_topn_spin, self.f_center_spin, self.f_repeat_spin,
                      self.rsm_center_spin, self.rsm_repeat_spin, self.rsm_alpha_spin):
             spin.valueChanged.connect(self._refresh_preview)
+        self.t_noise_levels_combo.currentTextChanged.connect(self._refresh_preview)
+        self.t_repeat_spin.valueChanged.connect(self._refresh_preview)
 
     def _on_method_changed(self, text):
         if "筛选" in text:
@@ -355,7 +375,8 @@ class ConfigurationPage(QWidget):
         elif "田口" in method:
             desc = ("田口稳健设计以正交表安排控制因子（内表）与噪声因子（外表），"
                     "通过内×外叉积试验估计均值与波动，并按信噪比（S/N）挑选稳健水平组合。"
-                    "业务建模中的环境因子将自动作为噪声因子。")
+                    "未固定的环境因子作为噪声因子；内外表可分别选择 2/3 水平并设置重复次数。"
+                    "无外表且无重复时只分析均值；望目采用相对目标中点的均方偏差损失 S/N，候选水平须做确认试验。")
         elif "代理模型" in method:
             desc = ("代理模型面向高成本仿真黑盒：先按试验设计生成样本点（响应留空，"
                     "在【数据管理】填入或导入结果），再由所选模型训练并评估。"
@@ -369,10 +390,10 @@ class ConfigurationPage(QWidget):
             self.rsm_center_spin.setValue(3)
 
     def _on_alpha_mode(self, text):
-        self.rsm_alpha_spin.setEnabled(text.startswith("用户"))
+        self.rsm_alpha_spin.setEnabled("CCD" in self.rsm_type_combo.currentText() and text.startswith("用户"))
 
     def _on_taguchi_levels(self, text):
-        levels = "2 水平" if "2" in text else "3 水平"
+        levels = self.t_levels_combo.currentText()
         inner_items = {
             "2 水平": ["自动推荐", "L4 (2^3)", "L8 (2^7)", "L12 (2^11)", "L16 (2^15)"],
             "3 水平": ["自动推荐", "L9 (3^4)", "L27 (3^13)"],
@@ -382,7 +403,7 @@ class ConfigurationPage(QWidget):
             "3 水平": ["无（仅内表）", "自动推荐", "L9 (3^4)", "L27 (3^13)"],
         }
         self._reset_combo(self.t_inner_combo, inner_items[levels])
-        self._reset_combo(self.t_outer_combo, outer_items[levels])
+        self._reset_combo(self.t_outer_combo, outer_items[self.t_noise_levels_combo.currentText()])
 
     @staticmethod
     def _reset_combo(combo, items):
@@ -398,10 +419,10 @@ class ConfigurationPage(QWidget):
     def _design_factors(self):
         """仅设计因子进入经典 DOE/代理抽样；环境因子仅用于田口外表。"""
         return [f for f in self.project_data.factors
-                if f.name and f.source == "设计" and not (f.is_fixed and f.fixed_value is not None)]
+                if f.name and f.source == "设计" and not f.is_fixed]
 
     def _noise_factors(self):
-        return [f for f in self.project_data.factors if f.name and f.source == "环境"]
+        return [f for f in self.project_data.factors if f.name and f.source == "环境" and not f.is_fixed]
 
     def _k(self):
         return len(self._design_factors())
@@ -451,17 +472,19 @@ class ConfigurationPage(QWidget):
                     self.rsm_alpha_spin.value(), centers=self.rsm_center_spin.value(),
                     replicates=self.rsm_repeat_spin.value(), randomize=False)
                 n = meta["total_runs"]
-                extra = f"（k={k}，{meta['design']}，中心点 {self.rsm_center_spin.value()}）"
+                extra = f"（k={k}，{meta['design']}，中心点 {self.rsm_center_spin.value()}）\n{meta['bounds_note']}"
             elif "田口" in method:
                 ctl = engine.simple_factors(self._design_factors())
                 noise = engine.simple_factors(self._noise_factors())
                 levels = 2 if "2 水平" in self.t_levels_combo.currentText() else 3
                 inner = self._resolve_oa(self.t_inner_combo.currentText(), len(ctl), levels)
                 if noise:
-                    outer = self._resolve_oa(self.t_outer_combo.currentText(), len(noise), levels)
+                    outer = self._resolve_oa(self.t_outer_combo.currentText(), len(noise), 2 if "2" in self.t_noise_levels_combo.currentText() else 3)
+                    if outer == "无":
+                        raise ValueError("存在未固定噪声因子，请选择外表；仅内表请先固定噪声因子")
                 else:
                     outer = "无"
-                rows, meta = engine.build_taguchi(ctl, noise, inner, outer, levels, seed=0)
+                rows, meta = engine.build_taguchi(ctl, noise, inner, outer, levels, seed=0, replicates=self.t_repeat_spin.value())
                 n = meta["total_runs"]
                 extra = (f"（k={len(ctl)} 控制+{len(noise)} 噪声，内表 {meta['inner_label']}"
                          f"×外表 {meta['outer_label']}）")
@@ -609,13 +632,14 @@ class ConfigurationPage(QWidget):
             noise_factors = engine.simple_factors(self._noise_factors())
             levels = 2 if "2 水平" in self.t_levels_combo.currentText() else 3
             inner = self._resolve_oa(self.t_inner_combo.currentText(), len(ctl_factors), levels)
-            outer = self._resolve_oa(self.t_outer_combo.currentText(), len(noise_factors), levels)
+            outer = self._resolve_oa(self.t_outer_combo.currentText(), len(noise_factors), 2 if "2" in self.t_noise_levels_combo.currentText() else 3)
             if noise_factors and outer == "无":
                 raise ValueError("当前存在环境（噪声）因子，田口外表不能为“无”；"
                                 "请选择外表正交表，或先在【业务建模】中移除环境因子。")
             rows, meta = engine.build_taguchi(
                 ctl_factors, noise_factors, inner, outer, levels,
-                seed=self.t_seed_spin.value())
+                seed=self.t_seed_spin.value(), replicates=self.t_repeat_spin.value(),
+                randomize=self.t_order_combo.currentText() == "随机")
             self._commit(rows, groups=meta["groups"])
             self.project_data.design_params = {
                 "meta": meta, "snr_mode": self.t_snr_combo.currentText(),
@@ -652,62 +676,46 @@ class ConfigurationPage(QWidget):
     def _commit(self, rows, groups=None):
         """把试验行写入 ProjectData.doe_matrix（响应列留空）。"""
         responses = [r.name for r in self.project_data.responses if r.name]
+        names = [f.name for f in self.project_data.factors if f.name]
+        if len(set(names + responses)) != len(names + responses) or set(names + responses) & {"Run_ID", "内表组号", "外表组号", "重复组号"}:
+            raise ValueError("因子和响应名称必须互不重复，且不能使用试验编号/组号等保留列名")
         matrix = []
         for i, row in enumerate(rows):
             record = {"Run_ID": i + 1}
             record.update(row)
+            for factor in self.project_data.factors:
+                if factor.name and factor.is_fixed:
+                    try:
+                        record[factor.name] = float(factor.fixed_value)
+                    except (TypeError, ValueError):
+                        raise ValueError(f"固定因子 {factor.name} 缺少有效固定值")
             if groups is not None:
                 record["内表组号"] = groups[i]["inner"] + 1
                 if groups[i]["outer"] is not None:
                     record["外表组号"] = groups[i]["outer"] + 1
+                record["重复组号"] = groups[i].get("replicate", 0) + 1
             for r in responses:
                 record[r] = ""
             matrix.append(record)
         self.project_data.doe_matrix = matrix
+        for field in ("screening_result", "taguchi_result", "rsm_result", "surrogate_result"):
+            setattr(self.project_data, field, {})
         print(f"[OK] DOE 矩阵生成完成：{len(matrix)} 行，列={list(matrix[0].keys())}")
 
     # ------------------------------------------------------------- 后端结果
-    def _effect_prior(self):
-        """无响应数据时，用因子变动幅度作主效应先验排序。"""
-        scored = []
-        for f in self._design_factors():
-            lo, hi = engine.factor_limits(f)
-            if f.uncertainty == "概率":
-                mu = engine._num(f.param1, 0.0)
-                sigma = abs(engine._num(f.param2, 1.0))
-                effect = max(abs(mu), 1.0) * (1.0 + sigma)
-            else:
-                effect = max(abs(hi - lo), 0.1) * (1.0 + abs((lo + hi) / 2.0) * 0.2)
-            scored.append({"name": f.name, "effect": effect})
-        scored.sort(key=lambda item: item["effect"], reverse=True)
-        return scored
-
     def _write_screening_result(self, meta):
-        scored = self._effect_prior()
-        total = sum(i["effect"] for i in scored) or 1.0
-        ranking = [{
-            "rank": i + 1, "name": item["name"], "effect": item["effect"],
-            "share": round(item["effect"] / total * 100, 2),
-        } for i, item in enumerate(scored)]
-        top = ranking[: max(1, self.f_topn_spin.value())]
-        names = "、".join(i["name"] for i in top)
         self.project_data.screening_result = {
-            "factor_rankings": ranking,
-            "main_effects": top,
-            "stability_impact": [{"name": i["name"], "impact": i["share"], "rank": i["rank"]}
-                                 for i in ranking],
-            "diagnostic_summary": (
-                f"筛选方案：{meta['kind']}，{meta['total_runs']} 次试验"
-                f"（基础 {meta['base_runs']} 次 + 中心点 {meta['centers']} 个 ×"
-                f"重复 {meta['replicates']}）。{meta['diagnostic']}。"
-                "当前为变动幅度先验排序；填入响应数据后将由【设计优化】按 ± 对比重算真实主效应。"),
-            "conclusion": f"先验排序识别出 {names} 等关键因子。",
-            "plot_points": [{"name": i["name"], "value": i["effect"]} for i in ranking],
+            "factor_rankings": [], "main_effects": [], "plot_points": [],
+            "stability_impact": [], "response_effects": {}, "response_analysis": {},
+            "diagnostic_summary": f"{meta['kind']}，{meta['total_runs']} 次试验。{meta['diagnostic']}",
+            "conclusion": "方案已生成，尚无响应数据；不生成先验因子排名。",
+            "analysis_status": "等待响应数据",
         }
 
     def _write_taguchi_result(self, meta):
         groups = meta.get("groups") or []
         self.project_data.taguchi_result = {
+            **meta,
             "array_name": meta["inner_label"],
             "outer_label": meta["outer_label"],
             "inner_runs": meta["inner_runs"],
@@ -722,7 +730,7 @@ class ConfigurationPage(QWidget):
             "groups": groups,
             "recommendation": (
                 "内表×外表叉积试验已完成安排。在【数据管理】填入各次试验响应后，"
-                "可到【设计优化】计算均值响应表、S/N 表并给出稳健最优水平组合。"),
+                "可到【设计优化】计算均值响应表、S/N 表并给出待确认的候选水平组合。"),
             "summary": (f"已按内表 {meta['inner_label']}（{meta['inner_runs']} 组）×"
                         f"外表 {meta['outer_label']}（{meta['outer_runs']} 组）生成"
                         f" {meta['total_runs']} 次叉积试验。"),

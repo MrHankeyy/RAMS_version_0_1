@@ -57,12 +57,12 @@ def _design_row(z, terms):
     return _np.array(row)
 
 
-def _quad_hess_diag(terms, z):
+def _quad_hess_diag(terms, coef, z):
     """二次模型对角二阶导（对 z）。"""
     out = _np.zeros(len(z))
-    for kind, i, _j in terms:
+    for (kind, i, _j), c in zip(terms, coef):
         if kind == "quad":
-            out[i] += 2.0
+            out[i] += 2.0 * c
     return out
 
 
@@ -80,7 +80,7 @@ def _quad_grad(terms, coef, z):
     return g
 
 
-def _fit_model(X, y):
+def _fit_model(X, y, full_quadratic=False):
     """拟合 X(输入，原始值) -> y，转为编码 z∈[-1,1] 的二次模型。返回模型 dict。"""
     if not HAS_NUMPY:
         raise RuntimeError("需要 numpy")
@@ -100,7 +100,7 @@ def _fit_model(X, y):
     for i in range(k):
         terms.append(("linear", i, None))
         names.append(f"x{i + 1}")
-        if distinct[i] >= 3:
+        if full_quadratic or distinct[i] >= 3:
             terms.append(("quad", i, i))
             names.append(f"x{i + 1}²")
     for i in range(k):
@@ -109,13 +109,16 @@ def _fit_model(X, y):
             names.append(f"x{i + 1}·x{j + 1}")
     A = _np.column_stack([_design_row(z, terms) for z in Z]).T
     nterms = len(terms)
-    if n < nterms:
+    if n < nterms and not full_quadratic:
         # 点数不足时降为线性模型
         keep = [i for i, (kind, *_r) in enumerate(terms) if kind in ("const", "linear")]
         terms = [terms[i] for i in keep]
         names = [names[i] for i in keep]
         A = A[:, keep]
         nterms = len(keep)
+    rank = int(_np.linalg.matrix_rank(A))
+    if rank < nterms:
+        raise ValueError(f"模型矩阵秩不足（{rank}/{nterms}）；无法独立估计全部系数，请补充有效设计点。")
     coef, *_ = _np.linalg.lstsq(A, y, rcond=None)
     y_hat = A @ coef
     ss_tot = float(_np.sum((y - y.mean()) ** 2)) or 1e-12
@@ -129,6 +132,7 @@ def _fit_model(X, y):
     resid_std = math.sqrt(ss_res / max(df_resid, 1)) if df_resid > 0 else rmse
     return {
         "terms": terms, "names": names, "coef": coef,
+        "full_quadratic": full_quadratic,
         "center": center, "half": span, "lo": lo, "hi": hi,
         "r2": round(r2, 6), "adj_r2": round(adj_r2, 6), "rmse": round(rmse, 6),
         "df_model": df_model, "df_residual": df_resid,
@@ -179,7 +183,7 @@ def model_hess_diag_x(model, x_raw):
                        - 2.0 * center + model["predict_fn"](x - delta)) / step ** 2
         return hess
     z = (_np.asarray(x_raw, float) - model["center"]) / model["half"]
-    hz = _quad_hess_diag(model["terms"], z)
+    hz = _quad_hess_diag(model["terms"], model["coef"], z)
     # 对 z 的二阶导转换：∂²f/∂x² = (1/h²)·∂²f/∂z²
     return hz / (model["half"] ** 2)
 
@@ -206,13 +210,16 @@ def build_models(project):
     matrix = project.doe_matrix or []
     if not matrix:
         return None, ["尚无 DOE 试验数据，请先在【方案配置】生成方案。"]
+    is_rsm = "响应曲面" in project.design_method
     inputs = [f for f in project.factors
-              if f.name and not (f.is_fixed and f.fixed_value not in (None, ""))]
+              if f.name and not f.is_fixed and (not is_rsm or f.source == "设计")]
     names = [f.name for f in inputs]
     if not names:
         return None, ["没有可建模的输入因子。"]
     # 只使用矩阵中实际存在的输入列
     keys = set(matrix[0].keys())
+    if is_rsm and any(n not in keys for n in names):
+        return None, ["DOE 缺少设计因子列，不能删去因子后继续拟合。"]
     names = [n for n in names if n in keys]
     inputs = [f for f in inputs if f.name in names]
     if not names:
@@ -228,20 +235,28 @@ def build_models(project):
         for row in matrix:
             try:
                 _ = [float(row[n]) for n in names]
-            except (TypeError, ValueError):
+            except (KeyError, TypeError, ValueError):
                 continue
             try:
                 yv = float(row.get(resp.name))
             except (TypeError, ValueError):
+                continue
+            if not all(math.isfinite(v) for v in _ + [yv]):
                 continue
             X.append([float(row[n]) for n in names])
             y.append(yv)
         if len(y) < 3:
             context["errors"].append(f"响应 {resp.name} 有效样本 {len(y)} < 3，跳过建模。")
             continue
-        context["models"][resp.name] = _fit_model(X, y)
+        if is_rsm and len(y) != len(matrix):
+            context["errors"].append(f"响应 {resp.name} 存在缺失/非有限数据，请补齐后拟合完整二次响应面。")
+            continue
+        try:
+            context["models"][resp.name] = _fit_model(X, y, full_quadratic=is_rsm)
+        except ValueError as exc:
+            context["errors"].append(f"响应 {resp.name}：{exc}")
     if not context["models"]:
-        return context, ["没有足够的响应数据可建模。"]
+        return context, context["errors"] or ["没有足够的响应数据可建模。"]
     return context, context["errors"]
 
 
@@ -892,6 +907,8 @@ def anova_and_lof(context, project):
         lines.append(f"◆ 响应 {resp_name}")
         lines.append(f"  回归：F={fstat:.4g}，df=({df_reg},{df_res})，p={p:.4g}，"
                      f"R²={m['r2']}，调整R²={m['adj_r2']}，RMSE={m['rmse']}")
+        if df_res <= 0 or ms_res <= 1e-24:
+            lines[-1] = f"  回归：R²={m['r2']}，RMSE={m['rmse']}；残差自由度不足或误差为零，F/p 不可估计。"
         # 失拟：从重复设计点估计纯误差
         pure_ss, pure_df = 0, 0
         point_groups = {}
@@ -914,11 +931,14 @@ def anova_and_lof(context, project):
             lof_ss = max(ss_res - pure_ss, 0.0)
             ms_pe = pure_ss / pure_df
             ms_lof = lof_ss / lof_df
-            lof_f = ms_lof / ms_pe if ms_pe > 0 else 0.0
+            if ms_pe <= 1e-24:
+                lines.append("  失拟(LOF)：重复点纯误差为零，F/p 不可估计；不能据此判定模型充分。")
+                continue
+            lof_f = ms_lof / ms_pe
             lof_p = _f_pvalue(lof_f, lof_df, pure_df)
             lines.append(f"  失拟(LOF)：SS_Lof={lof_ss:.4g}，SS_PE={pure_ss:.4g}，"
                          f"F_Lof={lof_f:.4g}，p={lof_p:.4g}，df=({lof_df},{pure_df})")
-            lines.append("  判定：" + ("模型拟合充分（LOF 不显著）。" if lof_p > 0.05
+            lines.append("  判定：" + ("未检出显著失拟，不等于证明模型充分。" if lof_p > 0.05
                                       else "模型存在失拟，建议改进模型结构或补点。"))
         else:
             lines.append("  失拟(LOF)：无重复点/中心点，无法估计纯误差，跳过 LOF。")
@@ -945,18 +965,20 @@ def cross_validation(context):
         rng = _np.random.default_rng(123)
         idx = rng.permutation(len(y))
         splits = _np.array_split(idx, kfold)
-        preds = _np.zeros(len(y))
+        preds = _np.full(len(y), _np.nan)
         for test_idx in splits:
             train_idx = _np.setdiff1d(_np.arange(len(y)), test_idx)
             if len(train_idx) < 3:
                 continue
             try:
-                m_fold = _fit_model(X[train_idx], y[train_idx])
+                m_fold = _fit_model(X[train_idx], y[train_idx], full_quadratic=m.get("full_quadratic", False))
                 for i in test_idx:
                     preds[i] = model_predict(m_fold, X[i])
             except Exception:
                 continue
-        valid = preds != 0
+        if not _np.all(_np.isfinite(preds)):
+            lines.append(f"  {resp_name}: 分折后样本不足或设计矩阵秩不足，无法验证同一模型；未降阶替代。")
+            continue
         actual = y
         ss_tot = float(_np.sum((actual - actual.mean()) ** 2)) + 1e-12
         ss_res = float(_np.sum((actual - preds) ** 2))

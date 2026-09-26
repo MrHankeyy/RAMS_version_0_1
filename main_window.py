@@ -209,8 +209,8 @@ class MainWindow(QMainWindow):
         self.page_OPT = OptimizationPage(self.project_data)
         self.page_REP = AnalysisPage(self.project_data)
         
-        # 绑定优化计算完成信号：自动跳转到“分析报告”页
-        self.page_OPT.optimization_finished.connect(lambda: self.on_switch_module("分析报告", 4))
+        # 更新报告，同时保留当前专用分析结果页
+        self.page_OPT.optimization_finished.connect(self.page_REP.run_analysis)
         self.page_MOD.model_saved.connect(self.page_CFG.update_info_display)
 
         self.stacked_widget.addWidget(self.page_MOD)

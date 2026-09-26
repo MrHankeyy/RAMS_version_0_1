@@ -137,6 +137,9 @@ SCREENING_KINDS = {
 
 def screening_coded_runs(k: int, kind: str):
     """返回筛选设计的编码行 [[+1/-1/0(中心), ...], ...] 与元信息。"""
+    limits = {"full": (1, 7), "half": (3, 10), "quarter": (5, 10), "pb": (1, 19)}
+    if kind not in limits or not limits[kind][0] <= k <= limits[kind][1]:
+        raise ValueError(f"{SCREENING_KINDS.get(kind, kind)}支持因子数：{limits.get(kind, '未知')}；当前 {k}。")
     if kind == "full":
         n = 2 ** k
         rows = [[1 if (i >> j) & 1 else -1 for j in range(k)] for i in range(n)]
@@ -153,19 +156,20 @@ def screening_coded_runs(k: int, kind: str):
         info_extra = f"分辨率为 {k}（第 {k} 个因子作为生成元）"
     elif kind == "quarter":
         n = 2 ** (k - 2)
+        masks = [m for m in range(1, n) if m.bit_count() >= 2]
+        a, b = max(itertools.combinations(masks, 2), key=lambda pair: (
+            min(pair[0].bit_count() + 1, pair[1].bit_count() + 1,
+                (pair[0] ^ pair[1]).bit_count() + 2),
+            pair[0].bit_count() + pair[1].bit_count() + (pair[0] ^ pair[1]).bit_count()))
         rows = []
         for i in range(n):
             row = [1 if (i >> j) & 1 else -1 for j in range(k - 2)]
-            g1 = 1
-            for j, v in enumerate(row):
-                if j % 2 == 0:
-                    g1 *= v
-            g2 = 1
-            for j, v in enumerate(row):
-                if j % 2 == 1:
-                    g2 *= v
+            g1 = math.prod(v for j, v in enumerate(row) if a & (1 << j))
+            g2 = math.prod(v for j, v in enumerate(row) if b & (1 << j))
             rows.append(row + [g1, g2])
-        info_extra = "分辨率 III~IV（生成元按奇偶分组，主效应保持正交）"
+        resolution = min(a.bit_count() + 1, b.bit_count() + 1, (a ^ b).bit_count() + 2)
+        generator = lambda mask: "×".join(f"x{j+1}" for j in range(k-2) if mask & (1 << j))
+        info_extra = f"分辨率 {resolution}；生成元 x{k-1}={generator(a)}，x{k}={generator(b)}；主效应正交，仍需检查交互混杂"
     elif kind == "pb":
         n = 12 if k <= 11 else 20
         matrix = _pb_matrix(n)
@@ -179,13 +183,17 @@ def screening_coded_runs(k: int, kind: str):
 def build_screening(factors, kind: str, seed: int, centers: int = 0,
                     replicates: int = 1, randomize: bool = True):
     """构造两水平筛选设计表。factors: [(名称,低,高,固定值),...]"""
+    if centers < 0 or replicates < 1:
+        raise ValueError("中心点数不能为负，重复次数至少为 1")
+    fixed_factors = [f for f in factors if f[3] is not None]
+    factors = [f for f in factors if f[3] is None]
     k = len(factors)
     if kind == "full" and k > 7:
         raise ValueError("全因子设计仅支持不超过 7 个因子（试验次数 2^k 过大）")
     if kind == "half" and k > 10:
         raise ValueError("1/2 部分析因仅支持不超过 10 个因子")
-    if kind == "quarter" and k < 4:
-        raise ValueError("1/4 部分析因至少需要 4 个因子")
+    if kind == "quarter" and k < 5:
+        raise ValueError("1/4 部分析因至少需要 5 个因子")
     if kind == "pb" and k > 19:
         raise ValueError("Plackett-Burman 最多支持 19 个因子")
 
@@ -199,6 +207,7 @@ def build_screening(factors, kind: str, seed: int, centers: int = 0,
             for (name, lo, hi, fixed), code in zip(factors, coded_row):
                 row[name] = fixed if fixed is not None else to_actual(code, lo, hi)
             rows.append(_round_row(row))
+            rows[-1].update({f[0]: f[3] for f in fixed_factors})
     if randomize:
         rng = random.Random(seed)
         rng.shuffle(rows)
@@ -209,6 +218,7 @@ def build_screening(factors, kind: str, seed: int, centers: int = 0,
         "replicates": replicates,
         "total_runs": len(rows),
         "diagnostic": info,
+        "active_factors": [f[0] for f in factors],
     }
     return rows, meta
 
@@ -253,7 +263,13 @@ def build_response_surface(factors, rsm_type: str, alpha_mode: str,
                            replicates: int = 1, seed: int = 0,
                            randomize: bool = True):
     """构造 CCD 或 BBD。rsm_type: 'CCD'/'BBD'。"""
+    if centers < 0 or replicates < 1:
+        raise ValueError("中心点数不能为负，重复次数至少为 1")
+    fixed_factors = [f for f in factors if f[3] is not None]
+    factors = [f for f in factors if f[3] is None]
     k = len(factors)
+    if rsm_type not in ("CCD", "BBD"):
+        raise ValueError("响应曲面类型必须为 CCD 或 BBD")
     if rsm_type == "BBD":
         if k < 3:
             raise ValueError("Box-Behnken 设计至少需要 3 个因子")
@@ -273,10 +289,14 @@ def build_response_surface(factors, rsm_type: str, alpha_mode: str,
         elif alpha_mode == "face":
             alpha = 1.0
         else:
-            alpha = float(custom_alpha or rot_alpha)
+            alpha = float(custom_alpha)
+        if not math.isfinite(alpha) or alpha <= 0:
+            raise ValueError("CCD 轴值必须为正数")
         coded = ccd_runs(k, alpha, centers)
         design_label = f"中心复合设计 CCD（k={k}, α={alpha}）"
 
+    if _np.linalg.matrix_rank(_design_matrix(_np.asarray(coded, float))[0]) < (k + 1) * (k + 2) // 2:
+        raise ValueError("当前点型无法识别完整二次模型；请增加中心点或调整 CCD 轴值。")
     rows = []
     for _ in range(max(1, replicates)):
         for coded_row in coded:
@@ -284,6 +304,7 @@ def build_response_surface(factors, rsm_type: str, alpha_mode: str,
             for (name, lo, hi, fixed), code in zip(factors, coded_row):
                 row[name] = fixed if fixed is not None else to_actual(code, lo, hi)
             rows.append(_round_row(row))
+            rows[-1].update({f[0]: f[3] for f in fixed_factors})
     if randomize:
         rng = random.Random(seed)
         rng.shuffle(rows)
@@ -297,6 +318,8 @@ def build_response_surface(factors, rsm_type: str, alpha_mode: str,
         "centers": centers,
         "replicates": replicates,
         "total_runs": len(rows),
+        "active_factors": [f[0] for f in factors],
+        "bounds_note": "CCD 的 α>1 轴点超出所填低/高水平；这些水平对应编码 ±1，不是硬边界。" if rsm_type == "CCD" and alpha > 1 else "所有设计点位于所填低/高水平内。",
     }
     return rows, meta
 
@@ -318,7 +341,7 @@ def taguchi_arrays(label: str, k_needed: int):
     _, levels, n, all_cols = _oa_levels(short)
     capacity = len(all_cols[0]) if all_cols else 0
     if k_needed > capacity:
-        raise ValueError(f"{short} 最多容纳 {capacity} 个两水平因子")
+        raise ValueError(f"{short} 最多容纳 {capacity} 个 {levels} 水平因子")
     matrix = [row[:k_needed] for row in all_cols]
     return short, levels, n, matrix
 
@@ -330,8 +353,15 @@ def _levels_of_factor(lo, hi, n_levels):
 
 
 def build_taguchi(control_factors, noise_factors, inner_label, outer_label,
-                  levels: int, seed: int = 0):
+                  levels: int, seed: int = 0, replicates: int = 1, randomize: bool = True):
     """田口设计：内表(控制因子) × 外表(噪声因子) 叉积。返回行与分组信息。"""
+    fixed = {f[0]: f[3] for f in control_factors + noise_factors if f[3] is not None}
+    control_factors = [f for f in control_factors if f[3] is None]
+    noise_factors = [f for f in noise_factors if f[3] is None]
+    if not control_factors:
+        raise ValueError("田口设计至少需要一个未固定的控制因子")
+    if replicates < 1:
+        raise ValueError("重复次数必须至少为 1")
     c_label, c_levels, n_inner, c_matrix = taguchi_arrays(inner_label, len(control_factors))
     if levels != c_levels:
         raise ValueError(f"内表 {c_label} 是 {c_levels} 水平表，与所选 {levels} 水平不一致")
@@ -360,10 +390,17 @@ def build_taguchi(control_factors, noise_factors, inner_label, outer_label,
                 for (name, *_rest), idx in zip(noise_factors, range(len(noise_factors))):
                     row[name] = noise_level_maps[name][n_matrix[oi][idx]]
             rows.append(_round_row(row))
+            rows[-1].update(fixed)
             groups.append({"inner": ci, "outer": oi if has_outer else 0})
+    base_rows, base_groups = rows, groups
+    rows, groups = [], []
+    for rep in range(replicates):
+        rows.extend(dict(row) for row in base_rows)
+        groups.extend({**g, "replicate": rep} for g in base_groups)
     rng = random.Random(seed)
     order = list(range(len(rows)))
-    rng.shuffle(order)
+    if randomize:
+        rng.shuffle(order)
     rows = [rows[i] for i in order]
     groups = [groups[i] for i in order]
     meta = {
@@ -373,6 +410,8 @@ def build_taguchi(control_factors, noise_factors, inner_label, outer_label,
         "inner_runs": n_inner,
         "outer_runs": n_outer if has_outer else 1,
         "has_outer": has_outer,
+        "replicates": replicates,
+        "noise_level_count": n_levels if has_outer else 0,
         "total_runs": len(rows),
         "factor_levels": factor_level_maps,
         "noise_levels": noise_level_maps if has_outer else {},
@@ -505,6 +544,8 @@ def fit_response_surface(X, y):
     """最小二乘拟合二次响应面，返回系数、拟合优度与预测值。"""
     A, labels = _design_matrix(X)
     n, p = A.shape
+    if _np.linalg.matrix_rank(A) < p:
+        raise ValueError("试验数据不能识别完整二次模型")
     coef, *_ = _np.linalg.lstsq(A, y, rcond=None)
     y_hat = A @ coef
     ss_tot = float(_np.sum((y - y.mean()) ** 2)) or 1e-12

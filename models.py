@@ -63,3 +63,24 @@ class ProjectData:
     rsm_result: dict = field(default_factory=dict)
     surrogate_config: dict = field(default_factory=dict)   # 方案配置中选择的代理模型参数
     surrogate_result: dict = field(default_factory=dict)   # 后端训练/评估结果
+
+    def analysis_signature(self):
+        import json
+        from dataclasses import asdict
+        return json.dumps({"factors": [asdict(f) for f in self.factors],
+                           "responses": [asdict(r) for r in self.responses],
+                           "method": self.design_method, "params": self.design_params,
+                           "matrix": self.doe_matrix, "surrogate": self.surrogate_config},
+                          sort_keys=True, ensure_ascii=False, default=str)
+
+    def ensure_results_current(self):
+        signature = self.analysis_signature()
+        previous = getattr(self, "_analysis_signature", signature)
+        changed = previous != signature
+        if changed:
+            self.screening_result = {}
+            self.taguchi_result = {}
+            self.rsm_result = {}
+            self.surrogate_result = {}
+        self._analysis_signature = signature
+        return changed

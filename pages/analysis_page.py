@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 from models import ProjectData
+from pages.design_results import DesignResultsPanel
 
 import matplotlib
 matplotlib.use('Qt5Agg')
@@ -28,7 +29,7 @@ class AnalysisPage(QWidget):
         self.info_label = QLabel("主效应筛选与稳健设计分析")
         self.info_label.setStyleSheet("font-weight: bold; font-size: 14px;")
 
-        self.calc_btn = QPushButton("运行分析")
+        self.calc_btn = QPushButton("刷新分析报告")
         self.calc_btn.setStyleSheet("background-color: #17a2b8; color: white;")
         self.calc_btn.setMinimumWidth(150)
         self.calc_btn.clicked.connect(self.run_analysis)
@@ -46,6 +47,10 @@ class AnalysisPage(QWidget):
         self.tab_diag = QWidget(); self.setup_diag_tab(); self.tabs.addTab(self.tab_diag, "设计诊断")
         self.tab_surrogate = QWidget(); self.setup_surrogate_tab(); self.tabs.addTab(self.tab_surrogate, "代理模型预测 vs 实测")
 
+        self.screening_panel = DesignResultsPanel("screening")
+        self.taguchi_panel = DesignResultsPanel("taguchi")
+        self.tabs.addTab(self.screening_panel, "筛选响应分析")
+        self.tabs.addTab(self.taguchi_panel, "田口水平分析")
         main_layout.addWidget(self.tabs)
         self.setLayout(main_layout)
 
@@ -83,48 +88,16 @@ class AnalysisPage(QWidget):
         layout.addWidget(self.surrogate_canvas)
 
     def run_analysis(self):
-        result = self.project_data.screening_result
-        if not result or not result.get("factor_rankings"):
-            result = {
-                "factor_rankings": [{"rank": idx + 1, "name": f.name, "share": 10 + (len([x for x in self.project_data.factors if x.name]) - idx) * 2} for idx, f in enumerate([f for f in self.project_data.factors if f.name][:5])],
-                "main_effects": [],
-                "stability_impact": [],
-                "diagnostic_summary": "系统未检测到有效筛选结果，请先在方案配置中生成筛选方案。",
-                "conclusion": "未生成筛选结论。",
-                "plot_points": [],
-            }
-
-        self.rank_table.setRowCount(len(result["factor_rankings"]))
-        for idx, item in enumerate(result["factor_rankings"]):
-            self.rank_table.setItem(idx, 0, QTableWidgetItem(str(item.get("rank", idx + 1))))
-            self.rank_table.setItem(idx, 1, QTableWidgetItem(str(item.get("name", ""))))
-            self.rank_table.setItem(idx, 2, QTableWidgetItem(f"{item.get('share', 0):.2f}%"))
-
-        self.fig.clear()
-        ax = self.fig.add_subplot(111)
-        plot_points = result.get("plot_points", [])
-        if plot_points:
-            names = [point["name"] for point in plot_points]
-            values = [float(point["value"]) for point in plot_points]
-            ax.bar(names, values, color="#17a2b8")
-            ax.set_title("主效应图 / 因子图")
-            ax.set_ylabel("影响强度")
-            ax.tick_params(axis='x', rotation=30)
-        else:
-            ax.text(0.5, 0.5, "待筛选结果", ha='center', va='center')
-        self.canvas.draw()
-
-        stability = result.get("stability_impact") or []
-        self.stability_table.setRowCount(len(stability))
-        for idx, item in enumerate(stability):
-            self.stability_table.setItem(idx, 0, QTableWidgetItem(str(item.get("name", ""))))
-            self.stability_table.setItem(idx, 1, QTableWidgetItem(f"{item.get('impact', 0):.2f}%"))
-            self.stability_table.setItem(idx, 2, QTableWidgetItem(f"Rank {item.get('rank', idx + 1)}"))
-
-        self.diag_text.setText(
-            f"【筛选结论】\n{result.get('conclusion', '无筛选结论。')}\n\n"
-            f"【诊断摘要】\n{result.get('diagnostic_summary', '暂无诊断信息。')}"
-        )
+        self.project_data.ensure_results_current()
+        method = self.project_data.design_method
+        screening, taguchi = "筛选" in method, "田口" in method
+        for i in range(self.tabs.count()):
+            self.tabs.setTabVisible(i, i == (5 if screening else 6 if taguchi else 3) or (i == 4 and "代理模型" in method))
+        self.screening_panel.set_result(self.project_data.screening_result)
+        self.taguchi_panel.set_result(self.project_data.taguchi_result)
+        self.tabs.setCurrentIndex(5 if screening else 6 if taguchi else 3)
+        fit = (self.project_data.rsm_result or {}).get("fit", {})
+        self.diag_text.setText("\n".join(f"{name}：R²={item['r2']}，RMSE={item['rmse']}，残差自由度={item['df_residual']}" for name, item in fit.items()) if "响应曲面" in method and fit else "请先在优化设计模块执行当前方案分析；本页仅展示已计算结果。")
 
         # 代理模型预测 vs 实测
         self.surrogate_fig.clear()
@@ -149,4 +122,6 @@ class AnalysisPage(QWidget):
             ax.text(0.5, 0.5, "暂无代理模型训练数据", ha="center", va="center")
         self.surrogate_canvas.draw()
 
-        QMessageBox.information(self, "分析完成", "已更新筛选与主效应分析结果。")
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.run_analysis()

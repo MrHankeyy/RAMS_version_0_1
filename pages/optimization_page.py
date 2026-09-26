@@ -25,6 +25,8 @@ from PyQt6.QtCore import pyqtSignal
 
 import doe_engine as engine
 import optimizer_engine as oe
+import design_analysis as da
+from pages.design_results import DesignResultsPanel
 from models import ProjectData
 
 import matplotlib
@@ -49,6 +51,8 @@ class OptimizationPage(QWidget):
     def __init__(self, project_data: ProjectData):
         super().__init__()
         self.project_data = project_data
+        self.project_data.ensure_results_current()
+        self._input_signature = self.project_data.analysis_signature()
         self.init_ui()
 
     # ------------------------------------------------------------------ UI
@@ -89,6 +93,10 @@ class OptimizationPage(QWidget):
         self.tabs.addTab(self.tab_tol, "容差贡献")
         self.tabs.addTab(self.tab_model, "模型提取")
         self.tabs.addTab(self.tab_tools, "优化工具集")
+        self.screening_panel = DesignResultsPanel("screening")
+        self.taguchi_panel = DesignResultsPanel("taguchi")
+        self.tabs.addTab(self.screening_panel, "筛选主效应")
+        self.tabs.addTab(self.taguchi_panel, "田口稳健分析")
         main_layout.addWidget(self.tabs)
 
         self.setLayout(main_layout)
@@ -112,7 +120,12 @@ class OptimizationPage(QWidget):
         else:
             self.run_all_btn.setText("执行稳定性设计与鲁棒优化")
             self.run_btn.setText("更新方案汇总")
-        self.tabs.setTabEnabled(1, not is_special)
+        for index in (1, 3, 4, 5, 6, 7, 8):
+            self.tabs.setTabVisible(index, not is_special)
+        self.tabs.setTabVisible(9, is_screening)
+        self.tabs.setTabVisible(10, is_taguchi)
+        if hasattr(self, "level_table"):
+            self.level_table.setVisible(not is_special)
         self.run_all_btn.setToolTip(
             "筛选设计只计算因子敏感度，不执行优化"
             if is_screening else
@@ -288,12 +301,14 @@ class OptimizationPage(QWidget):
         total = 0
         for row in self._matrix():
             val = row.get(response_name, "")
-            if isinstance(val, (int, float)) or (isinstance(val, str) and val.strip()):
-                total += 1
+            try:
+                total += int(math.isfinite(float(val)))
+            except (TypeError, ValueError):
+                pass
         return total
 
     def _has_response_data(self, response_name):
-        return self._count_filled(response_name) >= 4
+        return bool(self._matrix()) and self._count_filled(response_name) == len(self._matrix())
 
     # ------------------------------------------------------------- 视图调度
     def _refresh_view(self, text):
@@ -338,30 +353,11 @@ class OptimizationPage(QWidget):
 
     def _screening_text(self):
         result = self.project_data.screening_result or {}
-        rankings = result.get("factor_rankings") or []
-        lines = ["【两水平筛选设计结果】"]
-        if not rankings:
-            lines.append("尚未生成筛选方案。")
-            return "\n".join(lines)
-        lines.append("")
-        lines.append(result.get("diagnostic_summary", ""))
-        lines.append("")
-        if result.get("response_effects"):
-            lines.append("【按已填响应计算的 ± 主效应】")
-            for resp_name, effects in result["response_effects"].items():
-                lines.append(f"  响应：{resp_name}")
-                for item in effects:
-                    lines.append(f"    {item['name']}: 效应 {item['effect']:+.4g}"
-                                 f"（贡献 {item['share']:.1f}%）")
-            lines.append("")
-        lines.append("【因子影响排序】")
-        for item in rankings[:10]:
-            lines.append(f"  {item.get('rank')}. {item.get('name')} — {item.get('share', 0)}%")
-        lines.append("")
-        lines.append(result.get("conclusion", ""))
-        if not result.get("response_effects"):
-            lines.append("")
-            lines.append("当前排序仅为输入范围先验，不能替代响应数据计算的真实敏感度。")
+        lines = ["【筛选设计：主效应分析】", result.get("analysis_status", "等待分析"),
+                 result.get("diagnostic_summary", ""), result.get("conclusion", "")]
+        for name, message in result.get("errors", {}).items():
+            lines.append(f"{name}：{message}")
+        lines.append("各响应的有符号效应、纯误差、中心点曲率和混杂提示见【筛选主效应】页。")
         return "\n".join(lines)
 
     def _rsm_text(self):
@@ -389,7 +385,8 @@ class OptimizationPage(QWidget):
             lines.append(f"  R² = {resp_fit['r2']} ｜ 调整 R² = {resp_fit['adj_r2']} ｜ "
                          f"RMSE = {resp_fit['rmse']} ｜ 模型自由度 {resp_fit['df_model']} / "
                          f"残差自由度 {resp_fit['df_residual']}")
-            lines.append("  系数（按绝对值排序）：")
+            lines.append(f"  编码 z=(x−中心)/半跨度：{resp_fit.get('coding', {})}")
+            lines.append("  编码变量系数（按绝对值排序）：")
             coefs = sorted(resp_fit["coefficients"], key=lambda c: abs(c[1]), reverse=True)
             for name, value in coefs[:8]:
                 lines.append(f"    {name} = {value:+.5g}")
@@ -401,30 +398,13 @@ class OptimizationPage(QWidget):
 
     def _taguchi_text(self):
         result = self.project_data.taguchi_result or {}
-        if not result:
-            return "尚未生成田口方案。"
-        lines = ["【田口稳健设计结果】"]
-        lines.append(f"内表 {result.get('array_name', '')} × 外表 {result.get('outer_label', '无')}"
-                     f"｜ 因子水平数 {result.get('levels', 2)}")
-        if result.get("metric_label"):
-            lines.append(f"指标：{result['metric_label']}")
-        lines.append(result.get("summary", ""))
-        if result.get("analysis_status"):
-            lines.append(f"状态：{result['analysis_status']}")
-        lines.append("")
-        snr_rows = result.get("signal_to_noise") or []
-        if snr_rows:
-            lines.append("【因子-水平 S/N 响应表】")
-            for item in snr_rows[:14]:
-                lines.append(f"  [{item.get('response')}] {item.get('factor')}："
-                             f"{item.get('detail', '')}")
-            lines.append("")
-            lines.append(f"【稳健最优水平组合】{result.get('best_levels', '')}")
-            lines.append("")
-            lines.append(result.get("recommendation", ""))
-        else:
-            lines.append(result.get("recommendation", ""))
-            lines.append("提示：填入/导入全部响应数据后，点击“计算田口信噪比”生成稳健水平推荐。")
+        lines = ["【田口设计：按响应的稳健水平分析】", result.get("summary", ""),
+                 result.get("analysis_status", "等待响应数据"), result.get("recommendation", "")]
+        for name, levels in result.get("best_levels_by_response", {}).items():
+            lines.append(f"{name} 的候选水平：{levels}")
+        for name, message in result.get("errors", {}).items():
+            lines.append(f"{name}：{message}")
+        lines.append("内表组均值/标准差、因子水平表、均值与信噪比图见【田口稳健分析】页。")
         return "\n".join(lines)
 
     def _surrogate_text(self):
@@ -458,6 +438,7 @@ class OptimizationPage(QWidget):
 
     # ------------------------------------------------------------- 后端执行
     def run_optimization(self):
+        self._check_inputs()
         method = self._method()
         if not method:
             QMessageBox.warning(self, "无方案", "请先在【方案配置】生成试验方案。")
@@ -477,14 +458,16 @@ class OptimizationPage(QWidget):
         self.status_label.setText("分析完成：结果已更新")
         self._refresh_view(self.view_combo.currentText())
         if "筛选" in method:
-            self.tabs.setCurrentIndex(0)
+            self.tabs.setCurrentWidget(self.screening_panel)
             self.view_combo.setCurrentText("筛选设计结果")
             self.result_text.setPlainText(self._screening_text())
+            self._finish_classic(self.project_data.screening_result)
             return
         if "田口" in method:
-            self.tabs.setCurrentIndex(0)
+            self.tabs.setCurrentWidget(self.taguchi_panel)
             self.view_combo.setCurrentText("田口稳健结果")
             self.result_text.setPlainText(self._taguchi_text())
+            self._finish_classic(self.project_data.taguchi_result)
             return
         QMessageBox.information(
             self, "分析完成",
@@ -493,88 +476,67 @@ class OptimizationPage(QWidget):
         self.optimization_finished.emit()
 
     def _factors_for_doe(self):
-        return [f for f in self.project_data.factors if f.name and f.source == "设计"]
+        return da.active_controls(self.project_data)
+
+    def _finish_classic(self, result):
+        self.status_label.setText(result.get("analysis_status", "分析完成"))
+        self.data_overall_label.setText(oe.describe_data(self.project_data))
+        self._fill_level_table(oe.level_stats(self.project_data))
+        self.optimization_finished.emit()
+
+    def _check_inputs(self):
+        self.project_data.ensure_results_current()
+        signature = self.project_data.analysis_signature()
+        if signature != self._input_signature:
+            self._input_signature = signature
+            self._oe_context = None
+            self._robust_res = {}
+            self._param_res = {}
+            self._resid_data = {}
+            self.screening_panel.set_result({})
+            self.taguchi_panel.set_result({})
+            self.level_table.setRowCount(0)
+            for name in ("robust_text", "signif_text", "cv_text", "param_text", "tol_text", "model_text", "tool_text"):
+                getattr(self, name).clear()
+            for name in ("pareto", "resid", "factor"):
+                fig, canvas = getattr(self, name + "_fig", None), getattr(self, name + "_canvas", None)
+                if fig is not None:
+                    fig.clear()
+                    canvas.draw()
+            self.status_label.setText("输入已更新，请重新执行当前方案分析。")
+            self._refresh_view(self.view_combo.currentText())
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._check_inputs()
+        self._update_method_actions()
+        self.screening_panel.set_result(self.project_data.screening_result)
+        self.taguchi_panel.set_result(self.project_data.taguchi_result)
 
     # ------------------------------------------------------------- 筛选分析
     def _run_screening(self):
-        result = dict(self.project_data.screening_result or {})
-        factors = self._factors_for_doe()
-        resp_effects = {}
-        agg = {}
-        any_real = False
-        for resp in self._responses():
-            effects = engine.screening_from_responses(factors, self._matrix(), resp.name)
-            if effects:
-                any_real = True
-                total = sum(abs(v) for v in effects.values()) or 1.0
-                rows = [{"name": name, "effect": value,
-                         "share": round(abs(value) / total * 100, 2)}
-                        for name, value in sorted(effects.items(), key=lambda kv: -abs(kv[1]))]
-                resp_effects[resp.name] = rows
-                for name, value in effects.items():
-                    agg[name] = agg.get(name, 0.0) + abs(value)
-        if any_real:
-            total = sum(agg.values()) or 1.0
-            ranking = [{"rank": i + 1, "name": name, "effect": value,
-                        "share": round(value / total * 100, 2)}
-                       for i, (name, value) in enumerate(
-                           sorted(agg.items(), key=lambda kv: -kv[1]))]
-            result["factor_rankings"] = ranking
-            result["main_effects"] = ranking[:8]
-            result["response_effects"] = resp_effects
-            result["conclusion"] = "基于已填响应计算：主效应排序见上，显著因子建议进入下一轮建模。"
-            self.project_data.screening_result = result
-        else:
-            result["response_effects"] = {}
-            result["conclusion"] = (
-                "尚未计算真实主效应：请在【数据管理】填入每个响应的完整数据后，"
-                "再次点击“计算筛选主效应”。")
-            self.project_data.screening_result = result
+        self.project_data.screening_result = da.screening(self.project_data)
+        self.screening_panel.set_result(self.project_data.screening_result)
 
     # ------------------------------------------------------------- 响应曲面
     def _run_rsm(self):
-        if not engine.HAS_NUMPY:
-            QMessageBox.warning(self, "缺少依赖", "当前环境没有 numpy，无法拟合响应曲面。")
-            return
-        factors = self._factors_for_doe()
-        names = [f.name for f in factors]
-        fit = {}
-        for resp in self._responses():
-            if not self._has_response_data(resp.name):
-                fit[resp.name] = {"error": f"响应 {resp.name} 数据不足，无法拟合。"}
-                continue
-            X_rows, y = [], []
-            for row in self._matrix():
-                try:
-                    yv = float(row.get(resp.name))
-                except (TypeError, ValueError):
-                    continue
-                try:
-                    X_rows.append([float(row[n]) for n in names])
-                    y.append(yv)
-                except (TypeError, ValueError):
-                    continue
-            X = engine._np.array(X_rows)
-            yy = engine._np.array(y)
-            lo = engine._np.array([engine.factor_limits(f)[0] for f in factors])
-            hi = engine._np.array([engine.factor_limits(f)[1] for f in factors])
-            span = (hi - lo) / 2.0
-            span[span == 0] = 1.0
-            Xc = (X - (lo + hi) / 2.0) / span
-            fitted = engine.fit_response_surface(Xc, yy)
-            feature = resp.feature
-            obj = "max" if feature == "望大" else ("min" if feature == "望小" else "target")
-            target = ((float(resp.lower) + float(resp.upper)) / 2.0
-                      if feature == "望目" else None)
-            opt = engine.quadratic_optimum(fitted, [-1] * len(factors), [1] * len(factors),
-                                           obj, target=target)
-            if opt:
-                mids = (lo + hi) / 2.0
-                opt["x"] = [round(float(mid + c * half), 6)
-                            for mid, half, c in zip(mids, span, opt["x"])]
-            fitted["optimum"] = opt
-            fit[resp.name] = fitted
-        self.project_data.rsm_result["fit"] = fit
+        context, errors = oe.build_models(self.project_data)
+        if errors or not context or not context["models"]:
+            raise ValueError("\n".join(errors or ["响应曲面拟合失败"]))
+        self._oe_context = context
+        self._store_rsm_fit(context)
+        return context
+
+    def _store_rsm_fit(self, context):
+        fitted = {}
+        for name, model in context["models"].items():
+            fitted[name] = {
+                key: model[key] for key in ("r2", "adj_r2", "rmse", "df_model", "df_residual", "predicted")
+            }
+            fitted[name]["coefficients"] = list(zip(model["names"], [float(c) for c in model["coef"]]))
+            fitted[name]["coding"] = dict(zip(context["names"], zip(model["center"].tolist(), model["half"].tolist())))
+        self.project_data.rsm_result["fit"] = fitted
+        self.project_data.rsm_result["message"] = "汇总与优化使用同一完整二次模型；输入编码 z=(x−中心)/半跨度。"
 
     # ------------------------------------------------------------- 田口分析
     def _snr_type(self, resp, mode):
@@ -584,99 +546,11 @@ class OptimizationPage(QWidget):
 
     @staticmethod
     def _snr(values, snr_type):
-        vals = [float(v) for v in values]
-        if not vals:
-            return None
-        mean = statistics.mean(vals)
-        var = statistics.variance(vals) if len(vals) > 1 else 0.0
-        if snr_type == "望大":
-            mean_inverse_square = statistics.mean(
-                1.0 / max(v * v, 1e-24) for v in vals)
-            return round(-10 * math.log10(mean_inverse_square), 4)
-        if snr_type == "望小":
-            mean_square = statistics.mean(v * v for v in vals)
-            return round(-10 * math.log10(max(mean_square, 1e-24)), 4)
-        return round(10 * math.log10(mean * mean / (var + 1e-12) + 1e-12), 4)
+        return da.snr(values, snr_type)
 
     def _run_taguchi(self):
-        result = dict(self.project_data.taguchi_result or {})
-        matrix = self._matrix()
-        groups = result.get("groups")
-        if not groups or len(groups) != len(matrix):
-            self.project_data.taguchi_result["analysis_status"] = (
-                "试验分组信息不完整，无法计算 S/N；请重新生成田口方案。")
-            return
-        params = self.project_data.design_params or {}
-        mode = params.get("snr_mode", "按各响应目标特征自动")
-        level_maps = result.get("factor_levels") or {}
-        has_outer = result.get("has_outer", False)
-        result["metric_label"] = "信噪比 S/N" if has_outer else "内表均值响应（无外表）"
-        inner_count = result.get("inner_runs", 1)
-        per_resp_level_snr = {}
-        incomplete_responses = []
-
-        for resp in self._responses():
-            snr_type = self._snr_type(resp, mode)
-            inner_values = {i: [] for i in range(inner_count)}
-            filled = True
-            for row, g in zip(matrix, groups):
-                try:
-                    y = float(row.get(resp.name))
-                except (TypeError, ValueError):
-                    filled = False
-                    break
-                inner_values[int(g["inner"])].append(y)
-            if not filled:
-                incomplete_responses.append(resp.name)
-                continue
-            metrics = {}
-            for i, vals in inner_values.items():
-                if vals:
-                    metrics[i] = (self._snr(vals, snr_type) if has_outer
-                                  else round(sum(vals) / len(vals), 4))
-            resp_table = {}
-            for factor_name, levels in level_maps.items():
-                buckets = {lv: [] for lv in range(len(levels))}
-                for row, g in zip(matrix, groups):
-                    try:
-                        value = float(row.get(factor_name))
-                    except (TypeError, ValueError):
-                        continue
-                    idx = min(range(len(levels)), key=lambda k: abs(levels[k] - value))
-                    if g["inner"] in metrics:
-                        buckets[idx].append(metrics[g["inner"]])
-                resp_table[factor_name] = [
-                    {"level_value": levels[lv], "metric": round(sum(v) / len(v), 4)}
-                    for lv, v in buckets.items() if v
-                ]
-            per_resp_level_snr[resp.name] = resp_table
-
-        if not per_resp_level_snr:
-            result["analysis_status"] = (
-                "尚未完成 S/N 计算：请在【数据管理】填入每个响应的全部试验结果。")
-            result["signal_to_noise"] = []
-            self.project_data.taguchi_result = result
-            return
-        rows, best = [], {}
-        for resp_name, factor_tables in per_resp_level_snr.items():
-            for factor_name, table in factor_tables.items():
-                best_entry = max(table, key=lambda kv: kv["metric"])
-                best.setdefault(factor_name, best_entry["level_value"])
-                detail = "；".join(f"水平{lv['level_value']}→{lv['metric']}" for lv in table)
-                rows.append({"factor": factor_name, "response": resp_name,
-                             "detail": detail, "snr": best_entry["metric"]})
-        recommendation = "稳健最优水平组合：" + "、".join(
-            f"{k}@{v}" for k, v in best.items())
-        result["signal_to_noise"] = rows
-        result["best_levels"] = best
-        result["recommendation"] = recommendation + "。建议按该组合执行确认试验以验证稳健性。"
-        result["analysis_status"] = "S/N 计算完成：推荐水平来自各因子的最大 S/N。"
-        if not has_outer:
-            result["analysis_status"] = "无噪声外表：已按内表均值响应推荐水平，不执行 S/N 计算。"
-        if incomplete_responses:
-            result["analysis_status"] += (
-                f" 未完成响应：{', '.join(incomplete_responses)}。")
-        self.project_data.taguchi_result = result
+        self.project_data.taguchi_result = da.taguchi(self.project_data)
+        self.taguchi_panel.set_result(self.project_data.taguchi_result)
 
     # ------------------------------------------------------------- 代理模型
     def _surrogate_signature(self):
@@ -788,12 +662,18 @@ class OptimizationPage(QWidget):
             self.run_all_btn.setEnabled(True)
 
     def _execute_workbench(self):
+        self._check_inputs()
+        if any(x in self._method() for x in ("筛选", "田口")):
+            self.run_optimization()
+            return
         self._update_uncertainty_label()
         if "代理模型" in self._method():
             saved = self.project_data.surrogate_result or {}
             if saved.get("signature") != self._surrogate_signature():
                 self._run_surrogate()
             context, errors = self._build_surrogate_context()
+        elif "响应曲面" in self._method():
+            context, errors = self._run_rsm(), []
         else:
             context, errors = oe.build_models(self.project_data)
         self._oe_context = context
@@ -925,6 +805,7 @@ class OptimizationPage(QWidget):
         self.factor_canvas.draw()
 
     def _run_tool(self):
+        self._check_inputs()
         if not self._oe_context:
             QMessageBox.warning(self, "无模型", "请先点击【执行稳定性设计与鲁棒优化】。")
             return
