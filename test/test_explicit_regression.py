@@ -221,6 +221,7 @@ def test_robust_optimization():
         result = optimizer.robust_optimize(
             context, mode=mode, pop=30, gen=50, weight=0.7,
             k_design=6.0, k_constraint=1.0, seed=11,
+            sigma_limits={"Y": 10.0} if mode == "constraint" else None,
         )
         assert "best" in result and result["best"]["x"], (mode, result)
         assert all(0.0 <= value <= 4.0 for value in result["best"]["x"].values())
@@ -299,7 +300,7 @@ def test_bimodal_robust_front():
     assert stable["best"]["std_norm"] < narrow_moments[1]
 
     constrained = optimizer.robust_optimize(
-        context, mode="constraint", pop=80, gen=140, k_design=6.0,
+        context, mode="constraint", pop=80, gen=140, k_design=6.0, sigma_limits={"Y": 1.0},
         k_constraint=1.0, seed=23,
     )
     assert constrained["best"]["infeas"] <= 1e-8, constrained

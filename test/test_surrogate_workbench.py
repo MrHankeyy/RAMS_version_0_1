@@ -2,6 +2,7 @@
 import os
 import sys
 import unittest
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -40,11 +41,16 @@ class SurrogateWorkbenchTest(unittest.TestCase):
                 trained = page.project_data.surrogate_result["responses"]["Y"]["predict_fn"]
                 with patch.object(page, "_run_surrogate", side_effect=AssertionError("unexpected retraining")), \
                      patch.object(oe, "build_models", side_effect=AssertionError("quadratic fallback")), \
-                     patch("pages.optimization_page.QMessageBox.information"), \
-                     patch("pages.optimization_page.QMessageBox.warning") as warning:
+                     patch("pages.optimization_page.Notice.information"), \
+                     patch("pages.optimization_page.Notice.warning") as warning:
                     page.run_all_btn.click()
+                    deadline = time.monotonic() + 30
+                    while getattr(page, '_worker', None) is not None and time.monotonic() < deadline:
+                        APP.processEvents()
+                        time.sleep(.01)
+                    self.assertIsNone(page._worker)
                     warning.assert_not_called()
-                self.assertIn("分析完成", page.status_label.text())
+                self.assertIn("计算完成", page.status_label.text())
                 self.assertIn("留出集", page.cv_text.toPlainText())
                 self.assertIn(model, page.model_text.toPlainText())
                 self.assertAlmostEqual(oe.model_predict(page._oe_context["models"]["Y"], [1.3]), trained([1.3 / 4]))
@@ -56,19 +62,18 @@ class SurrogateWorkbenchTest(unittest.TestCase):
         page._run_surrogate()
         page.project_data.doe_matrix[0]["Y"] += 1
         with patch.object(page, "_run_surrogate", wraps=page._run_surrogate) as train, \
-             patch("pages.optimization_page.QMessageBox.information"):
+             patch("pages.optimization_page.Notice.information"):
             page._execute_workbench()
             train.assert_called_once()
         page.close()
 
     def test_exception_does_not_escape_button(self):
         page = self.make_page()
-        with patch.object(page, "_execute_workbench", side_effect=ValueError("invalid data")), \
-             patch("pages.optimization_page.QMessageBox.warning") as warning, \
-             self.assertLogs(level="ERROR"):
+        with patch.object(page, "_prepare_context", side_effect=ValueError("invalid data")), \
+             patch("pages.optimization_page.Notice.warning") as warning:
             page.run_all_btn.click()
             warning.assert_called_once()
-        self.assertIn("分析失败", page.status_label.text())
+        self.assertIn("优化失败", page.status_label.text())
         self.assertTrue(page.run_all_btn.isEnabled())
         page.close()
 
@@ -129,7 +134,7 @@ class SurrogateWorkbenchTest(unittest.TestCase):
         context = self.constraint_context()
         for mode in ("multi", "weighted", "constraint"):
             result = oe.robust_optimize(context, mode=mode, pop=20, gen=30,
-                                        k_design=6, k_constraint=1, seed=7)
+                                        k_design=6, k_constraint=1, seed=7, sigma_limits={"Y": 10} if mode == "constraint" else None)
             self.assertLessEqual(result["best"]["x"]["X"], 2 / 3 + 1e-5, mode)
             self.assertEqual(result["objective_names"], ["Y"])
             self.assertEqual(result["constraint_names"], ["G"])

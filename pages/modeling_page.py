@@ -3,7 +3,7 @@ from PyQt6.QtGui import QPainter, QPen, QColor, QPalette
 from PyQt6.QtWidgets import (
     QWidget, QPushButton, QLabel, QVBoxLayout, QHBoxLayout,
         QTableWidget, QComboBox, QLineEdit, QHeaderView, QGroupBox,
-    QCheckBox, QMessageBox
+    QCheckBox, QMessageBox, QTabWidget, QSplitter
 )
 from models import ResponseItem, FactorItem, ProjectData
 
@@ -68,8 +68,8 @@ class MultiLevelHeader(QHeaderView):
             if x1 <= 0 or x0 >= self.viewport().width():
                 continue
             rect = QRect(x0, y, x1 - x0, band_h)
-            painter.fillRect(rect, QColor(245, 245, 247))
-            painter.setPen(QPen(QColor(200, 200, 210)))
+            painter.fillRect(rect, QColor(237, 242, 247))
+            painter.setPen(QPen(QColor(213, 222, 231)))
             painter.drawRect(rect)
             painter.setPen(self.palette().color(QPalette.ColorRole.Text))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
@@ -119,7 +119,8 @@ class ModelingPage(QWidget):
         response_layout.addWidget(self.response_table)
 
         response_group.setLayout(response_layout)
-        main_layout.addWidget(response_group)
+        sections = QSplitter(Qt.Orientation.Vertical)
+        sections.addWidget(response_group)
 
         # ========= 因子区 =========
         factor_group = QGroupBox("因子")
@@ -133,14 +134,22 @@ class ModelingPage(QWidget):
 
         self.design_factor_table = self._create_factor_table("设计因子")
         self.environment_factor_table = self._create_factor_table("环境因子")
-        factor_layout.addWidget(self._factor_section("设计因子", self.design_factor_table, self.add_design_factor_row))
-        factor_layout.addWidget(self._factor_section("环境因子", self.environment_factor_table, self.add_environment_factor_row))
+        self.factor_tabs = QTabWidget()
+        self.factor_tabs.addTab(self._factor_section("可调整的设计输入", self.design_factor_table, self.add_design_factor_row), "设计因子")
+        self.factor_tabs.addTab(self._factor_section("使用工况与环境扰动", self.environment_factor_table, self.add_environment_factor_row), "环境因子")
+        factor_layout.addWidget(self.factor_tabs)
 
         factor_group.setLayout(factor_layout)
-        main_layout.addWidget(factor_group)
+        sections.addWidget(factor_group)
+        sections.setChildrenCollapsible(False)
+        sections.setSizes([230, 330])
+        main_layout.addWidget(sections, 1)
 
         # ========= 操作按钮区 =========
         btn_layout = QHBoxLayout()
+        self.save_status_label = QLabel("修改后请保存，再进入方案配置。")
+        self.save_status_label.setProperty("role", "muted")
+        btn_layout.addWidget(self.save_status_label)
         btn_layout.addStretch()
         self.save_btn = QPushButton("保存业务模型数据")
         self.save_btn.setMinimumWidth(150)
@@ -149,54 +158,30 @@ class ModelingPage(QWidget):
         btn_layout.addWidget(self.save_btn)
         main_layout.addLayout(btn_layout)
 
-        self.save_status_label = QLabel("修改后请保存业务模型数据")
-        self.save_status_label.setObjectName("save_status_label")
-        self.save_status_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        main_layout.addWidget(self.save_status_label)
-
         self.setLayout(main_layout)
-        self.setStyleSheet("""
-        QGroupBox {
-            margin-top: 12px;
-            font-size: 18px;
-            font-weight: bold;
-        }
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            left: 10px;
-            padding: 0 6px;
-        }
-        #response_group, #factor_group {
-            border: 1px solid #c9d2dc;
-            border-radius: 5px;
-            background: #ffffff;
-        }
-        #response_group QPushButton, #factor_group QPushButton {
-            border: 1px solid #9bb8d3;
-            border-radius: 4px;
-            background: #eaf3fb;
-            color: #174a73;
-            padding: 5px 12px;
-            font-weight: bold;
-        }
-        #response_group QPushButton:hover, #factor_group QPushButton:hover {
-            background: #d7eafb;
-        }
-        #save_model_btn {
-            border: 1px solid #1f75b5;
-            border-radius: 4px;
-            background: #2478b8;
-            color: white;
-            padding: 7px 18px;
-            font-weight: bold;
-        }
-        #save_model_btn:hover { background: #1b639b; }
-        #save_status_label { color: #64748b; padding-right: 4px; }
-        QTableWidget {
-            gridline-color: #d9e0e7;
-            alternate-background-color: #f7f9fb;
-        }
-        """)
+        from ui_theme import primary, polish_tables
+        primary(self.save_btn)
+        polish_tables(self)
+        self.response_table.setMinimumHeight(95)
+        self.design_factor_table.setMinimumHeight(110)
+        self.environment_factor_table.setMinimumHeight(110)
+        header = self.response_table.horizontalHeader()
+        for column, width in ((1,100),(2,100),(5,80),(6,80)):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            self.response_table.setColumnWidth(column, width)
+        for table in (self.design_factor_table, self.environment_factor_table):
+            for column, width in ((5,130),(6,80),(7,80)):
+                table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+                table.setColumnWidth(column, width)
+        for table in (self.design_factor_table, self.environment_factor_table):
+            table.model().rowsInserted.connect(self._update_factor_counts)
+            table.model().rowsRemoved.connect(self._update_factor_counts)
+        self._update_factor_counts()
+
+    def _update_factor_counts(self, *_args):
+        self.factor_tabs.setTabText(0, f"设计因子  {self.design_factor_table.rowCount()}")
+        self.factor_tabs.setTabText(1, f"环境因子  {self.environment_factor_table.rowCount()}")
+
 
     def on_save_clicked(self):
         """
@@ -205,32 +190,17 @@ class ModelingPage(QWidget):
         """
         errors = self._validate_response_inputs()
         if errors:
-            QMessageBox.warning(self, "业务建模数据校验未通过", "\n".join(errors))
+            Notice.warning(self, "业务建模数据校验未通过", "\n".join(errors))
             return
 
         self.sync_to_project_data()
+        self.project_data.ensure_results_current()
+        self.project_data.record_operation("业务模型保存")
         self.model_saved.emit()
         self.save_status_label.setText(
             f"已保存：{len(self.project_data.responses)} 个响应，"
             f"{len(self.project_data.factors)} 个因子")
         self.save_status_label.setStyleSheet("color:#16803c; font-weight:bold;")
-
-        # 演示：打印收集到的数据（模拟传递给后端算法）
-        print("======== 业务建模数据已保存 ========")
-        print(f"包含 {len(self.project_data.responses)} 个响应指标:")
-        for r in self.project_data.responses:
-            if r.feature == "望目":
-                print(f"  - {r.name}: {r.kind} ({r.feature}), 稳定性阈值区间: [{r.lower}, {r.upper}] {r.unit}")
-            else:
-                print(f"  - {r.name}: {r.kind} ({r.feature}), 稳定性阈值: {r.robust_limit} {r.unit}")
-
-        print(f"包含 {len(self.project_data.factors)} 个因子:")
-        for f in self.project_data.factors:
-            if f.uncertainty == "概率":
-                print(f"  - {f.name}: 连续 | {f.source} | 概率({f.distribution}), 均值: {f.param1}, 方差: {f.param2} {f.unit}")
-            else:
-                print(f"  - {f.name}: 连续 | {f.source} | 区间, 范围: [{f.param1}, {f.param2}] {f.unit}")
-        print("====================================")
 
     def _validate_response_inputs(self):
         """校验响应表：目标/约束至少勾选一项；望目必须填写逗号分隔的上下界。"""
@@ -359,7 +329,7 @@ class ModelingPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         header = QHBoxLayout()
         label = QLabel(title)
-        label.setStyleSheet("font-size: 16px; font-weight: bold; color: #34495e;")
+        label.setStyleSheet("font-size: 13px; font-weight: bold; color: #34495e;")
         add_button = QPushButton("+  新增因子")
         add_button.setMinimumWidth(112)
         add_button.clicked.connect(add_handler)
@@ -543,3 +513,5 @@ class ModelingPage(QWidget):
             for item in self.get_factor_data()
         ]
 
+
+from notifications import Notice

@@ -1,5 +1,5 @@
 """Read-only, response-specific result panels for classical DOE methods."""
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QTableWidget, QTableWidgetItem, QTextEdit, QHeaderView
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QTableWidget, QTableWidgetItem, QTextEdit, QHeaderView, QSplitter, QTabWidget
 import math
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
@@ -20,6 +20,7 @@ class DesignResultsPanel(QWidget):
         row.addWidget(factor_label)
         self.factor_combo = QComboBox()
         row.addWidget(self.factor_combo)
+        row.addStretch()
         self.factor_combo.setVisible(family == "taguchi")
         layout.addLayout(row)
         self.summary = QTextEdit()
@@ -29,15 +30,22 @@ class DesignResultsPanel(QWidget):
         self.table = QTableWidget()
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        layout.addWidget(self.table)
+        details = QTabWidget()
+        details.addTab(self.table, "效应汇总" if family == "screening" else "水平响应")
         self.runs_table = QTableWidget()
         self.runs_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.runs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.runs_table.setVisible(family == "taguchi")
-        layout.addWidget(self.runs_table)
+        if family == "taguchi":
+            details.addTab(self.runs_table, "试验组统计")
         self.fig = Figure(figsize=(6, 2.5), tight_layout=True)
         self.canvas = FigureCanvasQTAgg(self.fig)
-        layout.addWidget(self.canvas)
+        split = QSplitter()
+        split.addWidget(details)
+        split.addWidget(self.canvas)
+        split.setChildrenCollapsible(False)
+        split.setSizes([520, 480])
+        layout.addWidget(split, 1)
         self.response_combo.currentTextChanged.connect(self.render)
         self.factor_combo.currentTextChanged.connect(self.render)
 

@@ -391,11 +391,16 @@ def evaluate_design(context, x_design, k_design, weight_r, use_constraints=False
         data_max[name] = float(_np.max(m["predicted"])) if m["predicted"] else 1.0
     std_sum, perf_sum, wsum = 0.0, 0.0, 0.0
     infeas = 0.0
+    sigma_limits = context.get("sigma_limits", {})
     for resp in project_responses(context):
         m = models.get(resp.name)
         if m is None:
             continue
         mu, sigma = robust_moments(m, x_design, context, k_design)
+        if resp.name in sigma_limits:
+            bound = sigma_limits[resp.name]
+            infeas += max(0.0, sigma - bound) / max(abs(bound), 1e-12)
+            details.append({"name": resp.name, "sigma": sigma, "sigma_limit": bound, "margin": bound - sigma})
         d = _desirability(resp, mu, data_min[resp.name], data_max[resp.name])
         scale = _response_scale(m)
         std_n = sigma / max(scale, 1e-12)
@@ -541,40 +546,51 @@ def _polynomial_mutation(x, eta, pm, lo, hi, rng):
     return out
 
 
-def nsga2(evaluate, lo, hi, pop=60, gen=100, seed=1, eta_c=15.0, eta_m=20.0):
-    """最小化多目标。evaluate(vec)->(obj, info)。返回 (最终种群, 全部评估, 目标值)。"""
+def nsga2(evaluate, lo, hi, pop=60, gen=100, seed=1, eta_c=15.0, eta_m=20.0, progress=None):
+    """Elitist NSGA-II with feasibility-first survival and tournament selection."""
+    if pop < 2 or gen < 1:
+        raise ValueError("种群至少为 2，迭代代数至少为 1。")
     rng = _np.random.default_rng(seed)
     n = len(lo)
+    evaluated = {}
+    def assess(v):
+        key = tuple(float(x) for x in v)
+        if key not in evaluated:
+            evaluated[key] = evaluate(v)
+        return evaluated[key]
+    def order(population):
+        values = [assess(v) for v in population]
+        feasible = [i for i, (_, info) in enumerate(values) if info.get("r", {}).get("infeas", 0) <= 1e-8]
+        invalid = [i for i in range(len(values)) if i not in feasible]
+        rank = {}
+        distance = {}
+        fronts = _fast_non_dominated_sort([values[i][0] for i in feasible])
+        for r, front in enumerate(fronts):
+            if not front:
+                continue
+            crowd = _crowding_distance([values[i][0] for i in feasible], front)
+            for j in front:
+                rank[feasible[j]] = r
+                distance[feasible[j]] = crowd[j]
+        keys = {i:(0, rank[i], -distance[i]) for i in feasible}
+        keys.update({i:(1, values[i][1].get("r", {}).get("infeas", 0), sum(values[i][0])) for i in invalid})
+        return sorted(range(len(population)), key=keys.get), keys
     population = [[rng.uniform(lo[i], hi[i]) for i in range(n)] for _ in range(pop)]
-    evaluated = []
-    for _ in range(gen):
-        objs = [evaluate(v)[0] for v in population]
-        for v, o in zip(population, objs):
-            evaluated.append((tuple(round(x, 6) for x in v), tuple(o)))
-        fronts = _fast_non_dominated_sort(objs)
-        next_pop = []
-        for fr in fronts:
-            dist = _crowding_distance(objs, fr)
-            sorted_fr = sorted(fr, key=lambda i: (-dist[i]))
-            need = pop - len(next_pop)
-            next_pop.extend(sorted_fr[:need])
-            if len(next_pop) >= pop:
-                break
-        next_indiv = [population[i] for i in next_pop]
+    for generation in range(gen):
+        _, keys = order(population)
+        def parent():
+            a, b = rng.choice(len(population), 2, replace=False)
+            return population[a if keys[a] <= keys[b] else b]
         children = []
         while len(children) < pop:
-            parents = rng.choice(len(next_indiv), 2, replace=False)
-            p1, p2 = next_indiv[parents[0]], next_indiv[parents[1]]
-            c1, c2 = _sbx_crossover(p1, p2, eta_c, lo, hi, rng)
-            pm = 1.0 / n
-            children.append(_polynomial_mutation(c1, eta_m, pm, lo, hi, rng))
-            if len(children) < pop:
-                children.append(_polynomial_mutation(c2, eta_m, pm, lo, hi, rng))
-        population = children
-    final_objs = [evaluate(v)[0] for v in population]
-    for v, o in zip(population, final_objs):
-        evaluated.append((tuple(round(x, 6) for x in v), tuple(o)))
-    return population, evaluated
+            c1, c2 = _sbx_crossover(parent(), parent(), eta_c, lo, hi, rng)
+            children.extend([_polynomial_mutation(c, eta_m, 1.0/n, lo, hi, rng) for c in (c1,c2)])
+        combined = population + children[:pop]
+        indices, _ = order(combined)
+        population = [combined[i] for i in indices[:pop]]
+        if progress and (generation == 0 or (generation + 1) % max(1, gen//20) == 0 or generation + 1 == gen):
+            progress(generation + 1, gen)
+    return population, [(key, tuple(value[0])) for key, value in evaluated.items()]
 
 
 # ============================================================== 鲁棒优化
@@ -585,16 +601,14 @@ def design_inputs(context):
 def _pareto(sorted_pairs):
     """从 [(vec, objs, info)] 中筛出非支配解并排序。"""
     filtered = []
-    for i, (vec, obj, _info) in enumerate(sorted_pairs):
-        dominated = False
-        for j, (vec2, obj2, _info2) in enumerate(sorted_pairs):
-            if i == j:
-                continue
-            if _dominates(obj2, obj):
-                dominated = True
-                break
-        if not dominated:
-            filtered.append((vec, obj, _info))
+    seen = set()
+    for item in sorted_pairs:
+        key = tuple(item[1])
+        if key in seen or any(_dominates(other[1], item[1]) for other in filtered):
+            continue
+        filtered = [other for other in filtered if not _dominates(item[1], other[1])]
+        filtered.append(item)
+        seen.add(key)
     filtered.sort(key=lambda t: t[1][0])
     return filtered
 
@@ -619,8 +633,23 @@ def _knee_point(front):
 
 
 def robust_optimize(context, mode="multi", pop=60, gen=100, weight=0.5,
-                    k_design=6.0, k_constraint=6.0, seed=1):
+                    k_design=6.0, k_constraint=6.0, seed=1, sigma_limits=None, progress=None):
     """执行鲁棒优化，返回结果 dict。"""
+    if mode not in ("multi", "weighted", "constraint"):
+        raise ValueError("未知优化模式")
+    context = dict(context)
+    context.pop("sigma_limits", None)
+    if mode == "constraint":
+        objective_names = {r.name for r in project_responses(context) if not self_is_constraint(r) or "目标" in r.kind}
+        if not objective_names:
+            raise ValueError("独立约束模式需要至少一个目标响应。")
+        limits = sigma_limits or {}
+        if set(limits) != objective_names:
+            raise ValueError("请为每个目标响应设置独立标准差上限：" + "、".join(sorted(objective_names)))
+        limits = {name: float(value) for name, value in limits.items()}
+        if any(not _np.isfinite(value) or value <= 0 for value in limits.values()):
+            raise ValueError("标准差上限必须是有限正数，单位与响应一致。")
+        context["sigma_limits"] = limits
     dinputs = design_inputs(context)
     if not dinputs:
         return {"error": "没有可优化的设计因子，请先在【业务建模】添加设计因子。"}
@@ -636,11 +665,30 @@ def robust_optimize(context, mode="multi", pop=60, gen=100, weight=0.5,
                             k_constraint=k_constraint)
         if mode == "weighted":
             obj = [weight * r["obj"][0] + (1.0 - weight) * r["obj"][1]]
+        elif mode == "constraint":
+            # Keep improving the mean even beyond the sampled response range;
+            # clipped desirability would create false equal-optimum plateaus.
+            means = {item["name"]: item["mu"] for item in r["objectives"]}
+            losses = []
+            for response in project_responses(context):
+                if response.name not in means:
+                    continue
+                mu = means[response.name]
+                scale = max(_response_scale(context["models"][response.name]), 1e-12)
+                if response.feature == "望目":
+                    ref = _response_ref(response)
+                    if not isinstance(ref, tuple) or None in ref:
+                        raise ValueError(f"{response.name} 缺少望目上下界。")
+                    loss = abs(mu - (ref[0] + ref[1])/2)/scale
+                else:
+                    loss = (-mu if response.feature == "望大" else mu)/scale
+                losses.append(loss)
+            obj = [sum(losses)/len(losses)]
         else:
             obj = list(r["obj"])
         return obj, {"x": xd, "r": r}
 
-    population, evaluated = nsga2(evaluate, lo, hi, pop=pop, gen=gen, seed=seed)
+    population, evaluated = nsga2(evaluate, lo, hi, pop=pop, gen=gen, seed=seed, progress=progress)
     pairs = []
     for vec_tuple, _obj in evaluated:
         vec = list(vec_tuple)
@@ -661,7 +709,7 @@ def robust_optimize(context, mode="multi", pop=60, gen=100, weight=0.5,
     if not feasible:
         best = min(pairs, key=lambda t: (t[2]["r"]["infeas"], sum(t[1])))
 
-    knee = None if mode == "weighted" else _knee_point(front_full)
+    knee = _knee_point(front_full) if mode == "multi" else None
     recommended = best
     x_rec = recommended[2]["x"]
     r_rec = recommended[2]["r"]
@@ -679,6 +727,8 @@ def robust_optimize(context, mode="multi", pop=60, gen=100, weight=0.5,
                             "sigma": item["sigma"], "d": round(item["d"], 4), "role": role})
 
     result = {
+        "sigma_limits": context.get("sigma_limits", {}),
+        "population_size": pop, "generations": gen, "seed": seed,
         "mode": mode, "weight": weight, "k_design": k_design,
         "k_constraint": k_constraint, "design_names": dnames,
         "input_sigmas": {f.name: _sigma_of_factor(f, k_design) for f in context["inputs"]},
@@ -694,11 +744,14 @@ def robust_optimize(context, mode="multi", pop=60, gen=100, weight=0.5,
         "best": {"x": x_rec, "obj": [round(float(o), 6) for o in recommended[1]],
                  "mean_perf": round(r_rec["mean_perf"], 4),
                  "std_norm": round(r_rec["std_norm"], 4),
-                 "infeas": round(r_rec["infeas"], 6),
+                 "infeas": r_rec["infeas"],
+                 "sigma_constraints": r_rec["details"],
                  "responses": resp_detail},
         "evaluated_count": len(pairs),
     }
     result["text"] = _robust_result_text(result)
+    if mode == "constraint":
+        result["text"] += "\n独立标准差约束（响应原单位）：" + "；".join(f"{n}: σ ≤ {v:g}" for n,v in context["sigma_limits"].items())
     return result
 
 
@@ -719,7 +772,7 @@ def _robust_result_text(res):
     lines.append(f"评估解数量：{res['evaluated_count']}")
     lines.append(f"可行解数量：{res.get('feasible_count', 0)}；图中只显示可行解，不把约束罚项作为响应波动。")
     lines.append("")
-    if res["mode"] != "weighted" and res["front"]:
+    if res["mode"] == "multi" and res["front"]:
         lines.append(f"帕累托前沿解数量：{len(res['front'])}")
         knee = res.get("knee")
         if knee:
@@ -810,7 +863,8 @@ def describe_data(project):
         vals = []
         for row in matrix:
             try:
-                vals.append(float(row.get(resp.name)))
+                if _isfinite(row.get(resp.name)):
+                    vals.append(float(row[resp.name]))
             except (TypeError, ValueError):
                 continue
         if not vals:
@@ -818,9 +872,9 @@ def describe_data(project):
             continue
         vals.sort()
         mean = statistics.mean(vals)
-        std = statistics.pstdev(vals)
+        std = statistics.stdev(vals) if len(vals)>1 else float("nan")
         lines.append(f"  响应 {resp.name}: n={len(vals)}/{n} 均值={mean:.4g} "
-                     f"标准差={std:.4g} 最小={vals[0]:.4g} 最大={vals[-1]:.4g} "
+                     f"样本标准差={std:.4g} 最小={vals[0]:.4g} 最大={vals[-1]:.4g} "
                      f"极差={vals[-1] - vals[0]:.4g}")
     return "\n".join(lines)
 
@@ -830,10 +884,12 @@ def level_stats(project):
     factors = [f for f in project.factors if f.name and not (f.is_fixed and f.fixed_value not in (None, ""))]
     headers = ["因子", "水平", "响应", "均值", "方差", "极差", "样本数", "F比", "p值"]
     rows = []
+    if not matrix:
+        return {"headers": headers, "rows": rows}
     for f in factors:
         if f.name not in matrix[0]:
             continue
-        level_values = sorted({float(row[f.name]) for row in matrix if row.get(f.name) not in (None, "")})
+        level_values = sorted({float(row[f.name]) for row in matrix if _isfinite(row.get(f.name))})
         for resp in project.responses:
             if not resp.name:
                 continue
@@ -857,12 +913,12 @@ def level_stats(project):
             ss_between = sum(len(v) * (statistics.mean(v) - grand_mean) ** 2 for _lv, v in groups)
             ss_within = sum(sum((x - statistics.mean(v)) ** 2 for x in v) for _lv, v in groups)
             df_b = g - 1
-            df_w = max(n - g, 1)
-            fstat = (ss_between / df_b) / (ss_within / df_w) if ss_within > 0 and df_w > 0 else 0.0
-            p = _f_pvalue(fstat, df_b, df_w)
+            df_w = n - g
+            fstat = (ss_between / df_b) / (ss_within / df_w) if ss_within > 0 and df_w > 0 and df_b > 0 else float("nan")
+            p = _f_pvalue(fstat, df_b, df_w) if math.isfinite(fstat) else float("nan")
             for lv, v in groups:
                 mean = statistics.mean(v)
-                var = statistics.variance(v) if len(v) > 1 else 0.0
+                var = statistics.variance(v) if len(v) > 1 else float("nan")
                 rng = max(v) - min(v)
                 rows.append({
                     "factor": f.name, "level": lv, "response": resp.name,
@@ -1030,12 +1086,12 @@ def residual_analysis(context):
     return "\n".join(lines), data
 
 
-def tolerance_contribution(context, k_design):
+def tolerance_contribution(context, k_design, point=None):
     if not context or not context["models"]:
-        return "无模型可做容差贡献分析。"
+        return "无模型可做容差贡献分析。", {}
     inputs = context["inputs"]
     names = context["names"]
-    lines = ["【容差贡献度排序（一阶方差灵敏度）】"]
+    lines = ["【局部输入方差贡献（独立输入，对角二阶近似）】", f"参考点：{point or '设计区间中心'}", "包含一阶及对角曲率项，与当前优化器近似一致；不含混合二阶项，不代表全局重要性。"]
     detail = {}
     # 参考点：各设计因子取中心
     x_nom = {}
@@ -1045,31 +1101,33 @@ def tolerance_contribution(context, k_design):
         if f.source == "环境":
             val = float(f.param1) if (f.uncertainty == "概率" and f.param1) else (lo + hi) / 2.0
         else:
-            val = (lo + hi) / 2.0
+            val = (point or {}).get(f.name, (lo + hi) / 2.0)
             x_nom[f.name] = val
         x_raw.append(val)
     x = _np.array(x_raw, float)
     for resp_name, m in context["models"].items():
         grad = model_grad_x(m, x)
         sigmas = _np.array([_sigma_of_factor(f, k_design) for f in inputs])
-        contrib = (grad * sigmas) ** 2
-        total = float(contrib.sum()) or 1e-12
-        rows = sorted(zip(names, contrib.tolist()), key=lambda kv: -kv[1])
+        hess = model_hess_diag_x(m, x)
+        contrib = (grad * sigmas) ** 2 + 0.5 * (hess * sigmas**2)**2
+        residual_var = float(m.get("residual_std", 0))**2
+        total = float(contrib.sum()) + residual_var
+        rows = sorted(list(zip(names, contrib.tolist())) + [("模型残差", residual_var)], key=lambda kv: -kv[1])
         lines.append(f"  ◆ 响应 {resp_name}（总方差 {total:.5g}）")
         for name, c in rows:
-            lines.append(f"      {name}: 贡献 {c:.5g}（{c / total * 100:.2f}%）")
-        detail[resp_name] = [{"name": name, "share": c / total * 100} for name, c in rows]
+            lines.append(f"      {name}: 贡献 {c:.5g}（{(c / total * 100 if total > 0 else 0):.2f}%）")
+        detail[resp_name] = [{"name": name, "variance": c, "share": (c / total * 100 if total > 0 else 0)} for name, c in rows]
     return "\n".join(lines), detail
 
 
 # ============================================================== 参数设计/取值器
-def _metric_at(context, xd, k_design):
+def _metric_at(context, xd, k_design, k_constraint=6.0):
     r = evaluate_design(context, xd, k_design, weight_r=0.5, use_constraints=True,
-                        k_constraint=6.0)
+                        k_constraint=k_constraint)
     return r["mean_perf"], r["std_norm"]
 
 
-def parameter_design(context, robust_result, k_design):
+def parameter_design(context, robust_result, k_design, k_constraint=6.0):
     if not context or not context["models"]:
         return {"text": "无模型可做参数设计。"}
     d_inputs = design_inputs(context)
@@ -1084,33 +1142,39 @@ def parameter_design(context, robust_result, k_design):
         recommended = {n: (lo[n] + hi[n]) / 2.0 for n in dnames}
     # 稳定点：随机搜索最小化归一化 σ
     rng = _np.random.default_rng(7)
-    best_x, best_std = dict(recommended), float("inf")
+    initial = evaluate_design(context, recommended, k_design, .5, True, k_constraint)
+    best_x = dict(recommended) if initial["infeas"] <= 1e-12 else None
+    best_std = initial["std_norm"] if best_x is not None else float("inf")
     for _ in range(400):
         trial = {n: rng.uniform(lo[n], hi[n]) for n in dnames}
-        _m, std = _metric_at(context, trial, k_design)
-        if std < best_std:
+        evaluation = evaluate_design(context, trial, k_design, .5, True, k_constraint)
+        std = evaluation["std_norm"]
+        if evaluation["infeas"] <= 1e-12 and std < best_std:
             best_std, best_x = std, dict(trial)
     # 因子扫描图数据
     plots = []
     for f in d_inputs:
-        xs, mean_curve, std_curve = [], [], []
+        xs, mean_curve, std_curve, feasibility = [], [], [], []
         n_pts = 9
         for t in range(n_pts):
             val = lo[f.name] + (hi[f.name] - lo[f.name]) * t / (n_pts - 1)
             xd = dict(recommended)
             xd[f.name] = val
-            m, s = _metric_at(context, xd, k_design)
+            evaluated = evaluate_design(context, xd, k_design, .5, True, k_constraint)
+            m, s = evaluated["mean_perf"], evaluated["std_norm"]
+            feasibility.append(evaluated["infeas"] <= 1e-12)
             xs.append(round(val, 5))
             mean_curve.append(round(m, 4))
             std_curve.append(round(s, 4))
-        plots.append({"factor": f.name, "x": xs, "mean": mean_curve, "std": std_curve})
+        plots.append({"factor": f.name, "x": xs, "mean": mean_curve, "std": std_curve, "feasible": feasibility})
     lines = ["【参数设计与取值器】"]
-    lines.append(f"  推荐设计取值（鲁棒优化）：{ {k: round(v, 5) for k, v in recommended.items()} }")
-    lines.append(f"  稳定性最优取值（最小 σ）：{ {k: round(v, 5) for k, v in best_x.items()} }")
-    _m, _s = _metric_at(context, recommended, k_design)
-    _m2, _s2 = _metric_at(context, best_x, k_design)
+    lines.append(f"  优化返回参考点（约束违反={initial['infeas']:.5g}）：{ {k: round(v, 5) for k, v in recommended.items()} }")
+    lines.append(f"  有限抽样内的可行稳定候选：{best_x or '未找到；不输出违反约束的稳定点'}")
+    _m, _s = _metric_at(context, recommended, k_design, k_constraint)
+    _m2, _s2 = _metric_at(context, best_x, k_design, k_constraint) if best_x is not None else (float("nan"), float("nan"))
     lines.append(f"  推荐点：望性均值 {_m:.4f}，σ 归一 {_s:.4f}")
-    lines.append(f"  稳定点：望性均值 {_m2:.4f}，σ 归一 {_s2:.4f}")
+    if best_x is not None:
+        lines.append(f"  稳定候选：望性均值 {_m2:.4f}，σ 归一 {_s2:.4f}")
     lines.append("  提示：因子图见“参数设计”页，横轴为取值，纵轴为均值/稳定性。")
     return {"text": "\n".join(lines), "recommended": recommended,
             "stable": best_x, "factor_plots": plots}
@@ -1151,6 +1215,7 @@ def model_extraction(context):
             mag = abs(float(c))
             body = f"{mag:.5g}" if term == "常数" else f"{mag:.5g}·{term}"
             s.append((body if i == 0 and c >= 0 else sign + body))
+        lines.append("    以下符号均为编码变量：" + str(dict(zip(names, zip(m["center"].tolist(), m["half"].tolist())))) + "；编码值=(实际值−中心)/半跨度。")
         lines.append(f"  {resp_name}: y = " + "".join(s).strip())
         lines.append(f"    输入变量：{names}；R²={m['r2']}，调整R²={m['adj_r2']}")
     return "\n".join(lines)
@@ -1164,126 +1229,71 @@ def _design_bounds(context):
     return d_inputs, lo, hi
 
 
-def steepest_ascent(context, start, k_design, steps=6, step_frac=0.08):
+def local_search(context, start, k_design, k_constraint=6.0, weight=.5,
+                 method="AOFAT", steps=12, step_frac=.1):
+    """Bounded surrogate proposals, feasibility first; never labels an infeasible point feasible."""
     if not context or not context["models"]:
-        return "无模型，无法执行最陡上升。"
-    d_inputs, lo, hi = _design_bounds(context)
-    names = [f.name for f in d_inputs]
-    x = dict(start)
-    # 默认起点取中心
-    for f, l, h in zip(d_inputs, lo, hi):
-        x.setdefault(f.name, (l + h) / 2.0)
-    lines = ["【最陡上升路径】"]
-    lines.append(f"  起点：{ {k: round(v, 5) for k, v in x.items()} }")
-    path = []
-    for step in range(steps):
-        base_m, base_s = _metric_at(context, x, k_design)
-        grad = []
-        for n, f in zip(names, d_inputs):
-            l, h = de.factor_limits(f)
-            delta = max((h - l) * 0.02, 1e-6)
-            xp = dict(x); xp[n] = min(h, x[n] + delta)
-            xm = dict(x); xm[n] = max(l, x[n] - delta)
-            mp, _sp = _metric_at(context, xp, k_design)
-            mm, _sm = _metric_at(context, xm, k_design)
-            grad.append((mp - mm) / (2 * delta))
-        norm = math.sqrt(sum(g * g for g in grad)) or 1e-12
-        scale = max((h - l) * step_frac for l, h in zip(lo, hi))
-        moved = False
-        for n, g, f, l, h in zip(names, grad, d_inputs, lo, hi):
-            newv = x[n] + (g / norm) * scale
-            newv = max(l, min(h, newv))
-            if abs(newv - x[n]) > 1e-6:
-                x[n] = newv
-                moved = True
-        nm, ns = _metric_at(context, x, k_design)
-        path.append({"x": dict(x), "mean": nm, "std": ns})
-        lines.append(f"  第 {step + 1} 步：{ {k: round(v, 5) for k, v in x.items()} }"
-                     f" 望性={nm:.4f}, σ_norm={ns:.4f}")
-        if nm < base_m - 0.005 and step > 0:
-            lines.append("  望性未改善，提前终止。")
-            break
-        if not moved:
-            break
-    return "\n".join(lines), path
+        raise ValueError("无模型，无法执行优化工具")
+    inputs, lo, hi = _design_bounds(context)
+    if not inputs:
+        raise ValueError("无可调整设计因子")
+    names = [f.name for f in inputs]
+    lo, hi = _np.array(lo), _np.array(hi)
+    span = hi-lo
+    z = _np.clip((_np.array([start.get(n, (l+h)/2) for n,l,h in zip(names,lo,hi)])-lo)/span, 0, 1)
+    def evaluate(z):
+        point=dict(zip(names, (lo+z*span).tolist()))
+        r=evaluate_design(context,point,k_design,weight,True,k_constraint)
+        if not all(math.isfinite(r[key]) for key in ("mean_perf", "std_norm", "infeas")):
+            raise ValueError("模型在探索点返回非有限值，停止探索")
+        score=weight*(1-r["mean_perf"])+(1-weight)*r["std_norm"]
+        return {"x":point,"mean":r["mean_perf"],"std":r["std_norm"],
+                "violation":r["infeas"],"score":score,"feasible":r["infeas"]<=1e-12}
+    def key(r):
+        return (0 if r["feasible"] else 1, 0 if r["feasible"] else r["violation"], r["score"])
+    current=evaluate(z);path=[current];trials=[]
+    step=step_frac
+    for iteration in range(1,steps+1):
+        candidates=[]
+        if method=="最陡上升":
+            grad=[]
+            for j in range(len(z)):
+                zp=z.copy();zm=z.copy();zp[j]=min(1,z[j]+.001);zm[j]=max(0,z[j]-.001)
+                rp,rm=evaluate(zp),evaluate(zm)
+                field="score" if current["feasible"] else "violation"
+                grad.append((rp[field]-rm[field])/(zp[j]-zm[j]))
+            grad=_np.asarray(grad);norm=_np.linalg.norm(grad)
+            if norm>1e-12:
+                candidates=[_np.clip(z-step*scale*grad/norm,0,1) for scale in (1,.5,.25,.125)]
+        else:
+            for j in range(len(z)):
+                for sign in (-1,1):
+                    candidate=z.copy();candidate[j]=_np.clip(z[j]+sign*step,0,1);candidates.append(candidate)
+        evaluated=[(candidate,evaluate(candidate)) for candidate in candidates]
+        trials.extend({"iteration":iteration,**r} for _,r in evaluated)
+        better=[pair for pair in evaluated if key(pair[1]) < key(current)]
+        if better:
+            z,current=min(better,key=lambda pair:key(pair[1]));path.append(current)
+        else:
+            step*=.5
+        if method=="EVOP" or step<1e-5:break
+    lines=[f"【{method} 模型辅助局部探索】", f"λ={weight:g}，输入 k={k_design:g}，约束 k={k_constraint:g}。先满足约束，再减小加权损失。",
+           "所有点为模型计算，不是新增实测；EVOP 为局部单因子试探，不替代实际重复试验。"]
+    for i,r in enumerate(path):
+        lines.append(f"{i}: {r['x']}；望性={r['mean']:.5g}，σ归一={r['std']:.5g}，约束违反={r['violation']:.5g}，损失={r['score']:.5g}")
+    lines.append("候选满足当前约束，需实测确认。" if current["feasible"] else "未找到可行候选，不能作为可行推荐。")
+    return {"text":"\n".join(lines),"path":path,"trials":trials,"best":current}
 
 
-def evop_cycle(context, center, k_design):
-    if not context or not context["models"]:
-        return "无模型，无法执行 EVOP。"
-    d_inputs, lo, hi = _design_bounds(context)
-    names = [f.name for f in d_inputs]
-    x = dict(center)
-    for f, l, h in zip(d_inputs, lo, hi):
-        x.setdefault(f.name, (l + h) / 2.0)
-    lines = ["【EVOP 演化操作（单因素 ±1 步循环）】"]
-    base_m, base_s = _metric_at(context, x, k_design)
-    lines.append(f"  当前中心：{ {k: round(v, 5) for k, v in x.items()} } => "
-                 f"望性={base_m:.4f}, σ_norm={base_s:.4f}")
-    effects = []
-    for n, f in zip(names, d_inputs):
-        l, h = de.factor_limits(f)
-        step = (h - l) * 0.05
-        plus = dict(x); plus[n] = min(h, x[n] + step)
-        minus = dict(x); minus[n] = max(l, x[n] - step)
-        mp, sp = _metric_at(context, plus, k_design)
-        mm, sm = _metric_at(context, minus, k_design)
-        lines.append(f"  因子 {n}: +step 望性={mp:.4f} σ={sp:.4f}；"
-                     f"-step 望性={mm:.4f} σ={sm:.4f}")
-        effects.append((n, mp, sp, mm, sm))
-    # 建议：选对望性提升最大的因子方向
-    best = None
-    for n, mp, sp, mm, sm in effects:
-        dn = mp - mm
-        if best is None or abs(dn) > abs(best[1]):
-            best = (n, dn, mp > mm)
-    if best and abs(best[1]) > 1e-5:
-        n, dn, up = best
-        f = next(f for f in d_inputs if f.name == n)
-        l, h = de.factor_limits(f)
-        step = (h - l) * 0.05
-        newx = dict(x)
-        newx[n] = min(h, x[n] + step) if up else max(l, x[n] - step)
-        lines.append(f"  → 建议：沿 {n} 向 {'增' if up else '减'} 方向移动一步到 "
-                     f"{newx[n]:.5f}")
-    return "\n".join(lines)
+def steepest_ascent(context,start,k_design,steps=6,step_frac=.08,k_constraint=6.,weight=.5):
+    r=local_search(context,start,k_design,k_constraint,weight,"最陡上升",steps,step_frac)
+    return r["text"],r["path"]
 
 
-def aofat_search(context, center, k_design, rounds=4):
-    if not context or not context["models"]:
-        return "无模型，无法执行 AOFAT。"
-    d_inputs, lo, hi = _design_bounds(context)
-    names = [f.name for f in d_inputs]
-    x = dict(center)
-    for f, l, h in zip(d_inputs, lo, hi):
-        x.setdefault(f.name, (l + h) / 2.0)
-    lines = ["【自适应 AOFAT（单因子自适应优化）】"]
-    path = []
-    step_scale = 0.15
-    for rnd in range(rounds):
-        base_m, base_s = _metric_at(context, x, k_design)
-        score0 = base_m - 0.35 * base_s
-        best_move, best_score = None, score0
-        for n, f in zip(names, d_inputs):
-            l, h = de.factor_limits(f)
-            step = (h - l) * step_scale
-            for sgn in (1, -1):
-                xp = dict(x)
-                xp[n] = min(h, max(l, x[n] + sgn * step))
-                m, s = _metric_at(context, xp, k_design)
-                sc = m - 0.35 * s
-                if sc > best_score + 1e-6:
-                    best_score, best_move = sc, (n, sgn)
-        if best_move is None:
-            break
-        n, sgn = best_move
-        f = next(f for f in d_inputs if f.name == n)
-        l, h = de.factor_limits(f)
-        step = (h - l) * step_scale
-        x[n] = min(h, max(l, x[n] + sgn * step))
-        m, s = _metric_at(context, x, k_design)
-        path.append({"x": dict(x), "mean": m, "std": s})
-        lines.append(f"  第 {rnd + 1} 轮：{n} {'+' if sgn > 0 else '-'}"
-                     f" 到 {x[n]:.5f} => 望性={m:.4f} σ_norm={s:.4f}")
-        step_scale *= 0.7
-    return "\n".join(lines), path
+def evop_cycle(context,center,k_design,k_constraint=6.,weight=.5):
+    return local_search(context,center,k_design,k_constraint,weight,"EVOP",1,.05)["text"]
+
+
+def aofat_search(context,center,k_design,rounds=4,k_constraint=6.,weight=.5):
+    r=local_search(context,center,k_design,k_constraint,weight,"AOFAT",rounds,.15)
+    return r["text"],r["path"]

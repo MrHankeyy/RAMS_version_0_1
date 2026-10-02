@@ -1,270 +1,175 @@
-from PyQt6.QtWidgets import (
-    QWidget, QPushButton, QVBoxLayout, QHBoxLayout, 
-    QStackedWidget, QLabel, QMainWindow, QMenu, QSizePolicy, QApplication
-)
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtWidgets import (QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
+    QStackedWidget, QLabel, QTextEdit, QComboBox, QSplitter, QMainWindow,
+    QApplication, QScrollArea)
+from PyQt6.QtGui import QIcon
 from PyQt6.QtCore import Qt
-
 from pages.modeling_page import ModelingPage
 from pages.configuration_page import ConfigurationPage
 from pages.data_management_page import DataManagementPage
 from pages.optimization_page import OptimizationPage
 from pages.analysis_page import AnalysisPage
 from models import ProjectData
+from ui_theme import install_theme, polish_tables
 
 
 class MainWindow(QMainWindow):
+    PAGE_INFO = [
+        ("业务建模", "定义响应目标、性能约束与输入因子，建立分析问题。"),
+        ("方案配置", "选择试验设计方法，设置采样与模型参数，生成试验方案。"),
+        ("数据管理", "检查试验矩阵并回填响应；支持与 Excel 复制、粘贴。"),
+        ("设计优化", "运行当前方案分析，在分类工作区查看模型诊断与设计结果。"),
+        ("分析报告", "预览本次计算结果，填写编制信息并导出报告。"),
+    ]
+
     def __init__(self):
         super().__init__()
-
         self.project_data = ProjectData()
-
-        self.setWindowTitle("鲁棒优化管理系统")
-        self.resize(1360, 860)
+        self.setWindowTitle("RAMS · 稳定性设计与鲁棒优化")
+        self.resize(1440, 940)
+        self.setMinimumSize(1050, 700)
         self.setWindowIcon(QIcon("icon.png"))
-        font = self.font()
-        font.setFamily("Microsoft YaHei")
-        font.setPointSize(10)
-        QApplication.instance().setFont(font)
-
+        install_theme(QApplication.instance())
         self._build_ui()
 
     def _build_ui(self):
+        central = QWidget()
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self._build_module_navigation_bar())
+        heading = QWidget()
+        heading.setObjectName("pageHeading")
+        header = QHBoxLayout(heading)
+        header.setContentsMargins(22, 12, 22, 12)
+        text = QVBoxLayout()
+        text.setSpacing(3)
+        self.page_title = QLabel(self.PAGE_INFO[0][0])
+        self.page_title.setProperty("role", "heading")
+        self.page_description = QLabel(self.PAGE_INFO[0][1])
+        self.page_description.setProperty("role", "muted")
+        text.addWidget(self.page_title)
+        text.addWidget(self.page_description)
+        header.addLayout(text, 1)
+        self.step_label = QLabel("工作流程  1 / 5")
+        self.step_label.setProperty("role", "badge")
+        header.addWidget(self.step_label)
+        root.addWidget(heading)
+        self.workspace_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.workspace_splitter.addWidget(self._build_main_workspace())
+        self.workspace_splitter.addWidget(self._build_message_panel())
+        self.workspace_splitter.setCollapsible(0, False)
+        self.workspace_splitter.setCollapsible(1, False)
+        self.workspace_splitter.setStretchFactor(0, 1)
+        self.workspace_splitter.setStretchFactor(1, 0)
+        self.workspace_splitter.setSizes([700, 100])
+        root.addWidget(self.workspace_splitter, 1)
+        self.setCentralWidget(central)
+        polish_tables(self)
 
-        '''
-        包含五个组成部分：
-        1. 菜单栏 Menu Bar
-        2. 模块导航栏 Module Navigation Bar
-        3. 主工作区 Main Workspace 
-        4. 项目浏览器 Project Explorer
-        5. 消息面板 Message Panel
-        
-        五个工作区：
-        1. 业务建模 Model Setup, MOD
-        2. 方案配置 Configuration, CFG
-        3. 数据管理 Data Management, DM
-        4. 设计优化 Optimization, OPT
-        5. 分析报告 Report, REP
-        '''
-
-        self._build_menu_bar()
-
-        main_layout = QVBoxLayout()        
-        mid_layout = QHBoxLayout()
-        mid_right_layout = QVBoxLayout()
-        
-        project_explorer_panel = self._build_project_explorer()
-        module_nav_panel = self._build_module_navigation_bar()
-        main_workspace_panel = self._build_main_workspace()
-        message_panel = self._build_message_panel()
-
-        mid_layout.addWidget(project_explorer_panel, 1)
-        mid_right_layout.addWidget(module_nav_panel)
-        mid_right_layout.addWidget(main_workspace_panel, 9)
-        mid_layout.addLayout(mid_right_layout, 5)
-
-        main_layout.addLayout(mid_layout, 10)
-        main_layout.addWidget(message_panel, 2)
-
-        central_widget = QWidget()
-        central_widget.setLayout(main_layout)
-        self.setCentralWidget(central_widget)
-        
-        central_widget.setObjectName("central_widget")
-        central_widget.setStyleSheet("""
-        QWidget#central_widget { background: #f4f6f9; }
-        QTabWidget::pane { border: 1px solid #cdd6e0; background: #ffffff;
-                           border-radius: 4px; }
-        QTabBar::tab { padding: 6px 12px; background: #e9eef4;
-                       border: 1px solid #cdd6e0; border-bottom: none; }
-        QTabBar::tab:selected { background: #ffffff; font-weight: bold; }
-        QGroupBox { margin-top: 14px; font-weight: bold; color: #1f2937; }
-        QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 6px; }
-        QTableWidget { gridline-color: #dde4ec; alternate-background-color: #f8fafc; }
-        QHeaderView::section { background: #eef2f7; padding: 5px; border: 1px solid #d6dee8; }
-        QPushButton { border-radius: 4px; }
-        """)
-    
-    def _build_menu_bar(self):
-        menu_bar = self.menuBar()
-
-        file_menu = menu_bar.addMenu("文件")
-
-        action_new = QAction("新建项目", self)
-        action_open = QAction("打开项目", self)
-        action_save = QAction("保存", self)
-
-        file_menu.addAction(action_new)
-        file_menu.addAction(action_open)
-        file_menu.addAction(action_save)
-
-        setting_menu = menu_bar.addMenu("设置")
-        action_setting = QAction("参数设置", self)
-        setting_menu.addAction(action_setting)
-
-        help_menu = menu_bar.addMenu("帮助")
-        action_about = QAction("关于", self)
-        help_menu.addAction(action_about)
-
-        action_new.triggered.connect(lambda: print("新建项目"))
-        action_open.triggered.connect(lambda: print("打开项目"))
-        action_save.triggered.connect(lambda: print("保存"))
-    
     def _build_module_navigation_bar(self):
-        widget = QWidget()        
-        widget.setObjectName("module_navigation_bar")
-
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        self.btn_switch_MOD = QPushButton("业务建模")
-        self.btn_switch_CFG = QPushButton("方案配置")
-        self.btn_switch_DM = QPushButton("数据管理")
-        self.btn_switch_OPT = QPushButton("设计优化")
-        self.btn_switch_REP = QPushButton("分析报告")
-
-        self.btns_switch = [
-            self.btn_switch_MOD, 
-            self.btn_switch_CFG, 
-            self.btn_switch_DM, 
-            self.btn_switch_OPT, 
-            self.btn_switch_REP, 
-        ]
-        for btn in self.btns_switch:
-            btn.setSizePolicy(
-                QSizePolicy.Policy.Expanding, 
-                QSizePolicy.Policy.Expanding
-            )
-            btn.setProperty("active", False)             #每个按钮默认为非激活状态，表示页面是否选中
-
-        self.btn_switch_MOD.setProperty("active", True)                  #初始化默认激活业务建模页面
-        
-        self.btn_switch_MOD.clicked.connect(
-            lambda: self.on_switch_module("业务建模", 0)
-        )
-        self.btn_switch_CFG.clicked.connect(
-            lambda: self.on_switch_module("方案配置", 1)
-        )
-        self.btn_switch_DM.clicked.connect(
-            lambda: self.on_switch_module("数据管理", 2)
-        )
-        self.btn_switch_OPT.clicked.connect(
-            lambda: self.on_switch_module("设计优化", 3)
-        )
-        self.btn_switch_REP.clicked.connect(
-            lambda: self.on_switch_module("分析报告", 4)
-        )
-
-        layout.addWidget(self.btn_switch_MOD)
-        layout.addWidget(self.btn_switch_CFG)
-        layout.addWidget(self.btn_switch_DM)
-        layout.addWidget(self.btn_switch_OPT)
-        layout.addWidget(self.btn_switch_REP)
-
-        widget.setStyleSheet("""
-        #module_navigation_bar {
-            border: None;
-        }
-
-        /* 按钮默认 */
-        QPushButton {
-            border: 1px solid #bbb;
-            background-color: #f0f0f0;
-            font-weight: bold;
-            padding: 7px;
-            font-size: 15px;
-        }
-
-        /* 鼠标悬停 */
-        QPushButton:hover {
-            background-color: #e0e0e0;
-        }
-
-        /* 按下 */
-        QPushButton:pressed {
-            background-color: #d0d0d0;
-        }
-
-        /* 选中 */         
-        QPushButton[active="true"] {
-            background-color: #c8dfff;
-            font-weight: bold;
-        }
-        """)
-        widget.setFixedHeight(52)
-        
-        return widget
-    
-    def _build_main_workspace(self):
         widget = QWidget()
-        widget.setObjectName("main_workspace")
-        layout = QVBoxLayout(widget)
+        widget.setObjectName("appChrome")
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(22, 0, 16, 0)
+        layout.setSpacing(0)
+        brand = QLabel("RAMS  /  稳定性设计")
+        brand.setObjectName("brand")
+        layout.addWidget(brand)
+        layout.addSpacing(32)
+        self.btns_switch = []
+        for i, (title, _) in enumerate(self.PAGE_INFO):
+            button = QPushButton(f"{i+1:02d}  {title}")
+            button.setProperty("workflow", True)
+            button.setProperty("active", i == 0)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setToolTip(f"{title}（Alt+{i+1}）")
+            button.setShortcut(f"Alt+{i+1}")
+            button.clicked.connect(lambda checked=False, index=i: self.on_switch_module(self.PAGE_INFO[index][0], index))
+            self.btns_switch.append(button)
+            layout.addWidget(button, 1)
+        self.btn_switch_MOD, self.btn_switch_CFG, self.btn_switch_DM, self.btn_switch_OPT, self.btn_switch_REP = self.btns_switch
+        return widget
 
+    def _build_main_workspace(self):
         self.stacked_widget = QStackedWidget()
-
         self.page_MOD = ModelingPage(self.project_data)
         self.page_CFG = ConfigurationPage(self.project_data)
         self.page_DM = DataManagementPage(self.project_data)
         self.page_OPT = OptimizationPage(self.project_data)
         self.page_REP = AnalysisPage(self.project_data)
-        
-        # 更新报告，同时保留当前专用分析结果页
         self.page_OPT.optimization_finished.connect(self.page_REP.run_analysis)
         self.page_MOD.model_saved.connect(self.page_CFG.update_info_display)
+        for page in (self.page_MOD, self.page_CFG, self.page_DM, self.page_OPT, self.page_REP):
+            page.setMinimumWidth(1000)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(page)
+            self.stacked_widget.addWidget(scroll)
+        return self.stacked_widget
 
-        self.stacked_widget.addWidget(self.page_MOD)
-        self.stacked_widget.addWidget(self.page_CFG)
-        self.stacked_widget.addWidget(self.page_DM)
-        self.stacked_widget.addWidget(self.page_OPT)
-        self.stacked_widget.addWidget(self.page_REP)
-
-        layout.addWidget(self.stacked_widget)
-
-        widget.setStyleSheet("""
-        #main_workspace {
-            border: 1px solid #bbb;
-        }
-        """)
-
-        return widget
-    
-    def _build_project_explorer(self):
-        widget = QWidget()
-        widget.setObjectName("project_explorer")
-        layout = QVBoxLayout(widget)
-
-        temp_label = QLabel('这是主项目浏览器') #临时标签，后续接入主项目浏览器后去除
-        temp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(temp_label)
-        widget.setFixedWidth(230)
-
-        widget.setStyleSheet("""
-        #project_explorer {
-            border: 1px solid #bbb;
-        }
-        """)
-
-        return widget
-    
     def _build_message_panel(self):
+        from notifications import bus
         widget = QWidget()
-        widget.setObjectName("message_panel")
         layout = QVBoxLayout(widget)
-        
-        temp_label = QLabel('这是消息面板') #临时标签，后续接入消息面板后去除
-        temp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(temp_label)
-        widget.setMinimumHeight(90)
-
-        widget.setStyleSheet("""
-        #message_panel {
-            border: 1px solid #bbb;
-        }
-        """)
-
+        layout.setContentsMargins(16, 6, 16, 8)
+        layout.setSpacing(4)
+        bar = QHBoxLayout()
+        title = QLabel("运行消息")
+        title.setProperty("role", "muted")
+        bar.addWidget(title)
+        self.message_filter = QComboBox()
+        self.message_filter.addItems(["全部", "成功", "进度", "提醒", "错误"])
+        self.message_filter.setFixedWidth(94)
+        bar.addWidget(self.message_filter)
+        bar.addStretch()
+        self.message_count = QLabel("0 条消息")
+        self.message_count.setProperty("role", "muted")
+        bar.addWidget(self.message_count)
+        clear = QPushButton("清空")
+        bar.addWidget(clear)
+        self.fold_messages = QPushButton("收起")
+        self.fold_messages.setCheckable(True)
+        self.fold_messages.clicked.connect(self._toggle_messages)
+        bar.addWidget(self.fold_messages)
+        layout.addLayout(bar)
+        self.message_view = QTextEdit()
+        self.message_view.setReadOnly(True)
+        self.message_view.setMinimumHeight(45)
+        self.message_view.document().setMaximumBlockCount(500)
+        layout.addWidget(self.message_view)
+        self._messages = []
+        clear.clicked.connect(self._clear_messages)
+        self.message_filter.currentTextChanged.connect(self._render_messages)
+        bus.posted.connect(self._post_message)
+        self._post_message("进度", "工作区已就绪", "定义问题 → 配置试验 → 回填响应 → 分析优化 → 导出结果")
         return widget
-        
+
+    def _toggle_messages(self, collapsed):
+        self.message_view.setVisible(not collapsed)
+        self.fold_messages.setText("展开" if collapsed else "收起")
+        sizes = self.workspace_splitter.sizes()
+        self.workspace_splitter.setSizes([sum(sizes) - (45 if collapsed else 100), 45 if collapsed else 100])
+
+    def _post_message(self, level, title, message):
+        from datetime import datetime
+        self._messages.append((datetime.now().strftime("%H:%M:%S"), level, title, message))
+        self._messages = self._messages[-500:]
+        self._render_messages()
+
+    def _clear_messages(self):
+        self._messages.clear()
+        self._render_messages()
+
+    def _render_messages(self, *_args):
+        from html import escape
+        selected = self.message_filter.currentText()
+        self.message_count.setText(f"{len(self._messages)} 条消息")
+        colors = {"成功":"#168064", "进度":"#2563eb", "提醒":"#ad6800", "错误":"#c73545"}
+        self.message_view.setHtml("<br>".join(
+            f'<span style="color:{colors[level]}">{time} · {level} · {escape(title)}</span>　{escape(message).replace(chr(10), "<br>")}'
+            for time, level, title, message in self._messages if selected == "全部" or level == selected))
+        self.message_view.verticalScrollBar().setValue(self.message_view.verticalScrollBar().maximum())
+
     def on_test_click(self, name):
         print(f"已点击：{name}")
 
@@ -278,6 +183,18 @@ class MainWindow(QMainWindow):
             btn.update()
 
     def switch_page(self, index: int):
-        if index != 0:
+        if index != 0 and self.stacked_widget.currentIndex() == 0:
             self.page_MOD.sync_to_project_data()
         self.stacked_widget.setCurrentIndex(index)
+        title, description = self.PAGE_INFO[index]
+        self.page_title.setText(title)
+        self.page_description.setText(description)
+        self.step_label.setText(f"工作流程  {index + 1} / 5")
+
+    def closeEvent(self, event):
+        if getattr(self.page_OPT, "_worker", None) is not None:
+            from notifications import Notice
+            Notice.warning(self, "计算进行中", "请等待当前计算结束后关闭窗口。")
+            event.ignore()
+            return
+        super().closeEvent(event)

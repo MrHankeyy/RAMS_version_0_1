@@ -32,9 +32,7 @@ class ConfigurationPage(QWidget):
         self.info_label = QLabel()
         self.info_label.setWordWrap(True)
         self.info_label.setMinimumHeight(34)
-        self.info_label.setStyleSheet(
-            "color:#334155; background:#f7f9fc; border:1px solid #d8e0ea; "
-            "border-radius:4px; padding:6px 10px;")
+        self.info_label.setProperty("role", "muted")
         info_layout.addWidget(self.info_label)
         self.info_group.setLayout(info_layout)
         main_layout.addWidget(self.info_group)
@@ -45,7 +43,8 @@ class ConfigurationPage(QWidget):
         design_layout = QVBoxLayout()
         design_layout.setContentsMargins(12, 10, 12, 10)
         design_layout.setSpacing(8)
-        design_layout.addWidget(QLabel("核心设计方法："))
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel("设计方法"))
         self.method_combo = QComboBox()
         self.method_combo.addItems([
             "两水平筛选设计（全因子/部分析因/PB）",
@@ -55,7 +54,8 @@ class ConfigurationPage(QWidget):
             "代理模型建模 · SVR",
             "代理模型建模 · BP 神经网络",
         ])
-        design_layout.addWidget(self.method_combo)
+        method_row.addWidget(self.method_combo, 1)
+        design_layout.addLayout(method_row)
 
         self.dynamic_params_widget = QStackedWidget()
         self.dynamic_params_widget.setSizePolicy(
@@ -69,11 +69,6 @@ class ConfigurationPage(QWidget):
         for w in (self.screening_widget, self.rsm_widget,
                   self.taguchi_widget, self.surrogate_widget):
             w.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-            w.setStyleSheet(
-                "QWidget { background:#f7f9fc; border:1px solid #d8e0ea; "
-                "border-radius:4px; } QLabel { border:0; background:transparent; "
-                "color:#334155; } QComboBox, QSpinBox, QDoubleSpinBox { "
-                "min-height:24px; padding:2px 6px; }")
             self.dynamic_params_widget.addWidget(w)
         design_layout.addWidget(self.dynamic_params_widget)
 
@@ -84,7 +79,8 @@ class ConfigurationPage(QWidget):
 
         self.desc_text = QTextEdit()
         self.desc_text.setReadOnly(True)
-        self.desc_text.setFixedHeight(72)
+        self.desc_text.setMinimumHeight(65)
+        self.desc_text.setMaximumHeight(90)
         self.desc_text.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         design_layout.addWidget(self.desc_text)
@@ -94,11 +90,12 @@ class ConfigurationPage(QWidget):
 
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
-        self.refresh_btn = QPushButton("刷新模型数据(从业务建模获取)")
+        self.refresh_btn = QPushButton("刷新问题定义")
         self.refresh_btn.clicked.connect(self.update_info_display)
-        self.gen_btn = QPushButton("生成方案集")
+        self.gen_btn = QPushButton("生成试验方案")
         self.gen_btn.setMinimumWidth(150)
-        self.gen_btn.setStyleSheet("font-weight:bold;background-color:#1d4ed8;color:white;")
+        from ui_theme import primary
+        primary(self.gen_btn)
         self.gen_btn.clicked.connect(self.on_generate_clicked)
         btn_layout.addWidget(self.refresh_btn)
         btn_layout.addWidget(self.gen_btn)
@@ -321,7 +318,7 @@ class ConfigurationPage(QWidget):
         layout.addWidget(self.surrogate_info_label)
         row = QHBoxLayout()
         self.surrogate_open_btn = QPushButton("打开建模设置窗口…")
-        self.surrogate_open_btn.setStyleSheet("background-color:#2563eb;color:white;")
+        self.surrogate_open_btn.setStyleSheet("")
         self.surrogate_open_btn.clicked.connect(self._open_surrogate_dialog)
         row.addWidget(self.surrogate_open_btn)
         self.surrogate_status = QLabel("尚未设置模型参数")
@@ -553,16 +550,16 @@ class ConfigurationPage(QWidget):
         key = "Kriging" if "Kriging" in method else ("SVR" if "SVR" in method else "ANN")
         factors = self._design_factors()
         if not factors:
-            QMessageBox.warning(self, "缺少因子",
+            Notice.warning(self, "缺少因子",
                                 "当前没有可用的设计因子。请先在【业务建模】添加设计因子并保存。")
             return
         dialog = SurrogateDialog(key, factors, self)
         if dialog.exec() == SurrogateDialog.DialogCode.Accepted:
             self.surrogate_config = dialog.collect_config()
             self._update_surrogate_labels(method)
-            QMessageBox.information(
+            Notice.information(
                 self, "设置已保存",
-                "代理模型与试验设计参数已保存，点击下方【生成方案集】即可生成样本点（响应列留空，"
+                "代理模型与试验设计参数已保存，点击下方【生成试验方案】即可生成样本点（响应列留空，"
                 "随后在【数据管理】填入或导入响应结果）。")
 
     # ------------------------------------------------------------- 生成方案
@@ -571,17 +568,21 @@ class ConfigurationPage(QWidget):
         try:
             self._generate_by_method(method)
         except ValueError as exc:
-            QMessageBox.warning(self, "无法生成方案", str(exc))
+            self.project_data.record_operation("方案生成", "失败", message=str(exc))
+            Notice.warning(self, "无法生成方案", str(exc))
             return
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "生成失败", f"发生未预期错误：{exc}")
+            self.project_data.record_operation("方案生成", "失败", message=str(exc))
+            Notice.critical(self, "生成失败", f"发生未预期错误：{exc}")
             return
         self.project_data.design_method = method
+        self.project_data.workbench_result = {}
+        self.project_data.record_operation("方案生成", message=f"生成 {len(self.project_data.doe_matrix)} 行 DOE")
         self.info_label.setText(
             f"设计因子：{self._k()} 个 ｜ 环境因子：{len(self._noise_factors())} 个 ｜ "
             f"响应：{len(self.project_data.responses)} 个\n当前设计方案：{method}"
             f"（{len(self.project_data.doe_matrix)} 次试验）")
-        QMessageBox.information(
+        Notice.information(
             self, "方案已生成",
             f"已生成 {method} 试验方案，共 {len(self.project_data.doe_matrix)} 次试验。\n"
             "请进入【数据管理】查看 DOE 矩阵并填入/导入响应结果。")
@@ -700,7 +701,6 @@ class ConfigurationPage(QWidget):
         self.project_data.doe_matrix = matrix
         for field in ("screening_result", "taguchi_result", "rsm_result", "surrogate_result"):
             setattr(self.project_data, field, {})
-        print(f"[OK] DOE 矩阵生成完成：{len(matrix)} 行，列={list(matrix[0].keys())}")
 
     # ------------------------------------------------------------- 后端结果
     def _write_screening_result(self, meta):
@@ -735,3 +735,5 @@ class ConfigurationPage(QWidget):
                         f"外表 {meta['outer_label']}（{meta['outer_runs']} 组）生成"
                         f" {meta['total_runs']} 次叉积试验。"),
         }
+
+from notifications import Notice

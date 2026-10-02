@@ -45,8 +45,10 @@ class SurrogateDialog(QDialog):
         btn_row.addStretch()
         cancel_btn = QPushButton("取消")
         cancel_btn.clicked.connect(self.reject)
-        ok_btn = QPushButton("确定（保存设置）")
-        ok_btn.setStyleSheet("background-color:#1d4ed8;color:white;font-weight:bold;")
+        ok_btn = QPushButton("保存设置")
+        from ui_theme import primary, polish_tables
+        primary(ok_btn)
+        polish_tables(self)
         ok_btn.clicked.connect(self._on_ok)
         btn_row.addWidget(cancel_btn)
         btn_row.addWidget(ok_btn)
@@ -310,9 +312,11 @@ class SurrogateDialog(QDialog):
         bounds = self._bounds()
         for name, (lo, hi) in bounds.items():
             if hi <= lo:
-                QMessageBox.warning(self, "参数错误", f"变量 {name} 的上下界无效，请检查。")
+                Notice.warning(self, "参数错误", f"变量 {name} 的上下界无效，请检查。")
                 return
         if self.sample_count_spin.value() < len(self.factors) + 1:
-            QMessageBox.warning(self, "参数错误", "样本点数量过少，建议不小于因子数+1。")
+            Notice.warning(self, "参数错误", "样本点数量过少，建议不小于因子数+1。")
             return
         self.accept()
+
+from notifications import Notice

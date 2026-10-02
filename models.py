@@ -63,6 +63,13 @@ class ProjectData:
     rsm_result: dict = field(default_factory=dict)
     surrogate_config: dict = field(default_factory=dict)   # 方案配置中选择的代理模型参数
     surrogate_result: dict = field(default_factory=dict)   # 后端训练/评估结果
+    workbench_result: dict = field(default_factory=dict)   # 可序列化的工作台分析快照
+    report_metadata: dict = field(default_factory=dict)
+    report_history: list[dict] = field(default_factory=list)
+
+    def record_operation(self, stage, status="完成", payload=None, message=""):
+        from notifications import bus
+        bus.post("错误" if status == "失败" else "提醒" if status in ("未通过", "部分完成") else "成功", stage, status + ("：" + message if message else ""))
 
     def analysis_signature(self):
         import json
@@ -82,5 +89,6 @@ class ProjectData:
             self.taguchi_result = {}
             self.rsm_result = {}
             self.surrogate_result = {}
+            self.workbench_result = {}
         self._analysis_signature = signature
         return changed

@@ -145,10 +145,10 @@ class ClassicalDOE(unittest.TestCase):
             report=AnalysisPage(p);report.run_analysis()
             if '筛选' in method:
                 self.assertEqual(page.screening_panel.table.rowCount(),3)
-                self.assertEqual(report.screening_panel.table.rowCount(),3)
+                self.assertIn("筛选", report.report_html)
             elif '田口' in method:
                 self.assertEqual(page.taguchi_panel.table.rowCount(),6)
-                self.assertEqual(report.taguchi_panel.table.rowCount(),6)
+                self.assertIn("田口", report.report_html)
             else: self.assertTrue(p.rsm_result['fit'])
             p.doe_matrix[0]['Y']+=1
             page._check_inputs()
@@ -163,7 +163,7 @@ class ClassicalDOE(unittest.TestCase):
         p=ProjectData(factors=fs,responses=[ResponseItem(name='Y')],design_method='响应曲面设计',doe_matrix=rows,design_params={'meta':meta})
         page=OptimizationPage(p);page.pop_spin.setValue(20);page.gen_spin.setValue(10)
         with patch.object(QMessageBox,'information'), patch.object(QMessageBox,'warning') as warning:
-            page.run_workbench()
+            page._execute_workbench()
             warning.assert_not_called()
         self.assertTrue(page._robust_res.get('best'))
         np.testing.assert_allclose(page._oe_context['models']['Y']['predicted'],p.rsm_result['fit']['Y']['predicted'])
@@ -186,8 +186,8 @@ class ClassicalDOE(unittest.TestCase):
         self.assertFalse(r['best_levels']);self.assertFalse(r['response_analysis'])
         p=ProjectData(factors=factors(2),design_method='筛选设计')
         report=AnalysisPage(p);report.run_analysis()
-        self.assertEqual(report.rank_table.rowCount(),0)
-        self.assertEqual(report.screening_panel.table.rowCount(),0)
+        self.assertIsNone(report.report)
+        self.assertIn("暂无", report.preview.toPlainText())
         report.close()
 
 
