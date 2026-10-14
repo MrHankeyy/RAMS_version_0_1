@@ -36,14 +36,14 @@ class DesktopLayoutTests(unittest.TestCase):
         for method, wanted, unwanted in [('筛选设计', 9, 10), ('田口设计', 10, 9), ('响应曲面设计', 1, 9)]:
             page.project_data.design_method = method
             page._update_method_actions()
-            navigation = page.results_workspace.navigation
-            indices = [navigation.item(i).data(Qt.ItemDataRole.UserRole) for i in range(navigation.count())]
-            self.assertIn(wanted, indices)
-            self.assertNotIn(unwanted, indices)
-            navigation.setCurrentRow(indices.index(wanted))
+            workspace = page.results_workspace
+            self.assertIn(wanted, workspace.buttons)
+            self.assertNotIn(unwanted, workspace.buttons)
+            workspace.buttons[wanted].click()
             self.assertEqual(page.tabs.currentIndex(), wanted)
             page.tabs.setCurrentIndex(0)
-            self.assertEqual(navigation.currentItem().data(Qt.ItemDataRole.UserRole), 0)
+            self.assertTrue(workspace.buttons[0].isChecked())
+            self.assertEqual(sum(button.isChecked() for button in workspace.buttons.values()), 1)
 
     def test_factor_tabs_preserve_rows_and_show_counts(self):
         page = self.window.page_MOD

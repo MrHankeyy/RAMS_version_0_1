@@ -7,7 +7,7 @@
 """
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
-    QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QTableWidget,
+    QComboBox, QSpinBox, QDoubleSpinBox, QAbstractSpinBox, QPushButton, QTableWidget,
     QTableWidgetItem, QHeaderView, QMessageBox, QWidget
 )
 from PyQt6.QtCore import Qt
@@ -25,13 +25,14 @@ MODEL_TITLES = {
 class SurrogateDialog(QDialog):
     """代理模型设置窗口。factors 为业务建模中的设计因子对象列表。"""
 
-    def __init__(self, model_key, factors, parent=None):
+    def __init__(self, model_key, factors, parent=None, config=None):
         super().__init__(parent)
         self.model_key = model_key
         self.factors = [f for f in factors if getattr(f, "name", "").strip()]
         self.setWindowTitle(MODEL_TITLES[model_key])
         self.resize(760, 620)
         self._build_ui()
+        self._load_config(config)
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -73,6 +74,7 @@ class SurrogateDialog(QDialog):
         self.sample_count_spin = QSpinBox()
         self.sample_count_spin.setRange(6, 20000)
         self.sample_count_spin.setValue(50)
+        self.sample_count_spin.setKeyboardTracking(False)
         row1.addWidget(self.sample_count_spin)
         row1.addSpacing(20)
         row1.addWidget(QLabel("试验设计方法："))
@@ -258,6 +260,55 @@ class SurrogateDialog(QDialog):
         self.auto_widget.setVisible(not manual)
 
     # ------------------------------------------------------------------ 数据
+    def _load_config(self, config):
+        """Restore saved settings without changing the caller's configuration."""
+        if not config or config.get("model") != self.model_key or not self.factors:
+            return
+
+        def restore_combo(combo, value):
+            if value is None:
+                return
+            index = combo.findText(str(value))
+            if index < 0:
+                index = next((i for i in range(combo.count())
+                              if combo.itemText(i).startswith(str(value))), -1)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+
+        if "sample_count" in config:
+            self.sample_count_spin.setValue(int(config["sample_count"]))
+        restore_combo(self.doe_method_combo, config.get("doe_method"))
+        bounds = config.get("bounds") or {}
+        for row, factor in enumerate(self.factors):
+            if factor.name in bounds:
+                lo, hi = bounds[factor.name]
+                self.bounds_table.item(row, 1).setText(str(lo))
+                self.bounds_table.item(row, 2).setText(str(hi))
+
+        params = config.get("model_params", config)
+        if self.model_key == "Kriging":
+            restore_combo(self.corr_combo, params.get("correlation"))
+            restore_combo(self.regress_combo, params.get("trend"))
+        elif self.model_key == "SVR":
+            restore_combo(self.kernel_combo, params.get("kernel"))
+            for name in ("poly_degree", "c_min", "c_max", "c_step", "g_min", "g_max", "g_step"):
+                if name in params:
+                    control = self.poly_degree_spin if name == "poly_degree" else getattr(self, name)
+                    control.setValue(params[name])
+        else:
+            for name, control in (("hidden_layers", self.hidden_layers_spin),
+                                  ("hidden_nodes", self.hidden_nodes_spin),
+                                  ("learning_rate", self.lr_spin), ("epochs", self.epoch_spin)):
+                if name in params:
+                    control.setValue(params[name])
+            restore_combo(self.act_combo, params.get("activation"))
+            search = params.get("node_search")
+            if search:
+                for control, value in zip((self.node_min_spin, self.node_max_spin, self.node_step_spin), search):
+                    control.setValue(value)
+            restore_combo(self.net_mode_combo, params.get("net_mode") or
+                          ("自动寻优" if search else "手动设置"))
+
     def _bounds(self):
         result = {}
         for r, f in enumerate(self.factors):
@@ -272,6 +323,8 @@ class SurrogateDialog(QDialog):
         return result
 
     def collect_config(self):
+        for spin in self.findChildren(QAbstractSpinBox):
+            spin.interpretText()
         model_cfg = {}
         if self.model_key == "Kriging":
             model_cfg = {
@@ -309,6 +362,9 @@ class SurrogateDialog(QDialog):
         }
 
     def _on_ok(self):
+        if not self.factors:
+            return
+        self.sample_count_spin.interpretText()
         bounds = self._bounds()
         for name, (lo, hi) in bounds.items():
             if hi <= lo:

@@ -14,7 +14,8 @@ class ConfigurationPage(QWidget):
     def __init__(self, project_data: ProjectData):
         super().__init__()
         self.project_data = project_data
-        self.surrogate_config = {}
+        from copy import deepcopy
+        self.surrogate_config = deepcopy(project_data.surrogate_config)
         self.init_ui()
 
     # ------------------------------------------------------------------ 布局
@@ -553,10 +554,11 @@ class ConfigurationPage(QWidget):
             Notice.warning(self, "缺少因子",
                                 "当前没有可用的设计因子。请先在【业务建模】添加设计因子并保存。")
             return
-        dialog = SurrogateDialog(key, factors, self)
+        dialog = SurrogateDialog(key, factors, self, config=self.surrogate_config)
         if dialog.exec() == SurrogateDialog.DialogCode.Accepted:
             self.surrogate_config = dialog.collect_config()
             self._update_surrogate_labels(method)
+            self._refresh_preview()
             Notice.information(
                 self, "设置已保存",
                 "代理模型与试验设计参数已保存，点击下方【生成试验方案】即可生成样本点（响应列留空，"

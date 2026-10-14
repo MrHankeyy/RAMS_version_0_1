@@ -1,8 +1,8 @@
 """Shared desktop design system and analysis navigation."""
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import (QApplication, QWidget, QHBoxLayout, QListWidget,
-                            QListWidgetItem, QTableWidget, QAbstractItemView, QPushButton, QTabWidget)
+from PyQt6.QtWidgets import (QApplication, QWidget, QHBoxLayout, QVBoxLayout,
+                            QGroupBox, QScrollArea, QTableWidget, QAbstractItemView, QPushButton, QTabWidget)
 
 STYLE = """QWidget { color:#26364a; font-size:13px; }
 QMainWindow, QDialog { background:#eef1f5; }
@@ -40,10 +40,13 @@ QTabWidget::pane { background:white; border:1px solid #d5dee7; }
 QTabBar::tab { background:#edf1f5; color:#52667a; border:0; border-bottom:2px solid transparent; padding:8px 12px; }
 QTabBar::tab:selected { background:white; color:#246da4; border-bottom:2px solid #246da4; font-weight:600; }
 QTabBar::tab:hover { background:#e4edf5; }
-QListWidget#resultNavigation { border:0; border-right:1px solid #d5dee7; background:#f5f7fa; outline:0; }
-QListWidget#resultNavigation::item { padding:8px 10px; border-left:3px solid transparent; }
-QListWidget#resultNavigation::item:selected { background:#e1edf7; color:#215c89; border-left:3px solid #246da4; }
-QListWidget#resultNavigation::item:disabled { color:#8795a4; font-size:11px; padding-top:15px; padding-bottom:4px; }
+QScrollArea#resultNavigation { border:0; border-right:1px solid #d5dee7; background:#f5f7fa; }
+QWidget#resultNavigationContent { background:#f5f7fa; }
+QGroupBox#resultNavigationGroup { background:#fff; border:1px solid #c5d2df; border-radius:4px; margin-top:12px; padding:4px; color:#36536b; font-weight:600; }
+QGroupBox#resultNavigationGroup::title { subcontrol-origin:margin; left:10px; padding:0 4px; }
+QPushButton#resultNavigationButton { text-align:left; background:transparent; border:0; border-left:3px solid transparent; border-radius:2px; padding:4px 7px; min-height:18px; font-weight:400; }
+QPushButton#resultNavigationButton:hover { background:#edf5fc; }
+QPushButton#resultNavigationButton:checked { background:#e1edf7; color:#215c89; border-left:3px solid #246da4; }
 QSplitter::handle { background:#e1e7ee; }
 QSplitter::handle:hover { background:#9fb9d0; }
 QScrollArea { border:0; background:transparent; }
@@ -94,43 +97,58 @@ class ResultsWorkspace(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        self.navigation = QListWidget()
+        self.navigation = QScrollArea()
         self.navigation.setObjectName('resultNavigation')
-        self.navigation.setFixedWidth(166)
+        self.navigation.setWidgetResizable(True)
+        self.navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.navigation.setFixedWidth(196)
         layout.addWidget(self.navigation)
         layout.addWidget(tabs, 1)
         tabs.tabBar().hide()
-        self.navigation.currentItemChanged.connect(self._activate)
         tabs.currentChanged.connect(self._sync)
         self.refresh()
 
     def refresh(self):
-        self.navigation.blockSignals(True)
-        self.navigation.clear()
+        self.buttons = {}
+        self.groups = {}
+        content = QWidget()
+        content.setObjectName('resultNavigationContent')
+        column = QVBoxLayout(content)
+        column.setContentsMargins(8, 6, 8, 10)
+        column.setSpacing(8)
         for title, indices in self.GROUPS:
             visible = [i for i in indices if self.tabs.isTabVisible(i)]
             if not visible:
                 continue
-            heading = QListWidgetItem(title)
-            heading.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.navigation.addItem(heading)
+            group = QGroupBox(title)
+            group.setObjectName('resultNavigationGroup')
+            group_layout = QVBoxLayout(group)
+            group_layout.setContentsMargins(5, 14, 5, 5)
+            group_layout.setSpacing(2)
+            self.groups[title] = group
             for index in visible:
-                item = QListWidgetItem(self.tabs.tabText(index))
-                item.setData(Qt.ItemDataRole.UserRole, index)
-                self.navigation.addItem(item)
-        self.navigation.blockSignals(False)
+                button = QPushButton(self.tabs.tabText(index))
+                button.setObjectName('resultNavigationButton')
+                button.setCheckable(True)
+                button.setCursor(Qt.CursorShape.PointingHandCursor)
+                button.clicked.connect(lambda checked=False, i=index: self._activate(i))
+                group_layout.addWidget(button)
+                self.buttons[index] = button
+            column.addWidget(group)
+        column.addStretch()
+        old = self.navigation.takeWidget()
+        if old is not None:
+            old.deleteLater()
+        self.navigation.setWidget(content)
         self._sync(self.tabs.currentIndex())
 
-    def _activate(self, item, previous):
-        if item is not None and item.data(Qt.ItemDataRole.UserRole) is not None:
-            self.tabs.setCurrentIndex(item.data(Qt.ItemDataRole.UserRole))
+    def _activate(self, index):
+        self.tabs.setCurrentIndex(index)
+        self._sync(self.tabs.currentIndex())
 
     def _sync(self, index):
-        for row in range(self.navigation.count()):
-            item = self.navigation.item(row)
-            if item.data(Qt.ItemDataRole.UserRole) == index:
-                self.navigation.setCurrentItem(item)
-                break
+        for tab_index, button in self.buttons.items():
+            button.setChecked(tab_index == index)
 
 
 class ResultTabs(QTabWidget):
